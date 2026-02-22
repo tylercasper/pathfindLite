@@ -852,7 +852,7 @@ function M.new(navmesh, maxNodes)
                 end
 
                 neighbourNode.pidx  = bestNodeIdx    -- getNodeIdx inlined: bestNode never nil here
-                neighbourNode.id    = neighbourRef
+                -- neighbourNode.id == neighbourRef already (getNode guarantees it); skip redundant write
                 -- clear closed flag (subtract bit 1 if set)
                 if nf % 4 >= 2 then
                     nf = nf - DT_NODE_CLOSED
