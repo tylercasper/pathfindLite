@@ -1,12 +1,16 @@
 -- bench.lua — benchmark C++ and Lua pathfinders against a set of coordinate pairs.
 --
 -- Usage:
---   luajit bench.lua [file] [dataDir] [mapId] [cppBin]
+--   luajit bench.lua [file] [dataDir] [mapId] [cppBin] [flags...]
 --
 --   file    — path to an orderings file (default: orderings.json)
 --   dataDir — path containing mmaps/ and maps/ (default: /Volumes/Storage/Files/tbc)
 --   mapId   — WoW map ID (default: 0)
 --   cppBin  — path to the C++ pathfind binary
+--
+-- Output filter flags (no pipe needed):
+--   --mismatches   print only the "Mismatches: N / M" summary line
+--   --timing       print only the Lua/C++ timing summary block
 --
 -- FILE FORMAT
 -- -----------
@@ -29,10 +33,25 @@
 -- Decimal portions are ignored (only integer parts are used).
 -- Any number of orderings and pairs per ordering is supported.
 
-local orderings_file = arg and arg[1] or "orderings.json"
-local DATA_DIR       = arg and arg[2] or "/Volumes/Storage/Files/tbc"
-local MAP_ID         = arg and tonumber(arg[3]) or 0
-local CPP_BIN        = arg and arg[4] or
+-- ---------------------------------------------------------------------------
+-- Argument parsing: separate flags from positional args
+-- ---------------------------------------------------------------------------
+local filter_mismatches = false
+local filter_timing     = false
+local positional = {}
+if arg then
+    for i = 1, #arg do
+        if     arg[i] == "--mismatches" then filter_mismatches = true
+        elseif arg[i] == "--timing"     then filter_timing     = true
+        else   positional[#positional + 1] = arg[i]
+        end
+    end
+end
+
+local orderings_file = positional[1] or "orderings.json"
+local DATA_DIR       = positional[2] or "/Volumes/Storage/Files/tbc"
+local MAP_ID         = positional[3] and tonumber(positional[3]) or 0
+local CPP_BIN        = positional[4] or
     "/Volumes/Storage/dev2/cmangos/3build/contrib/pathfindlib/pathfind"
 
 -- Suppress [pathfind] debug output during benchmarking
@@ -75,10 +94,14 @@ for _, ordering in ipairs(orderings) do
     end
 end
 
-print(string.format("File:     %s", orderings_file))
-print(string.format("Data dir: %s  map %d", DATA_DIR, MAP_ID))
-print(string.format("Pairs:    %d", #pairs_list))
-print("")
+local verbose = not filter_mismatches and not filter_timing
+
+if verbose then
+    print(string.format("File:     %s", orderings_file))
+    print(string.format("Data dir: %s  map %d", DATA_DIR, MAP_ID))
+    print(string.format("Pairs:    %d", #pairs_list))
+    print("")
+end
 
 -- ---------------------------------------------------------------------------
 -- Lua benchmark
@@ -124,11 +147,13 @@ local function fmt(d)
     return string.format("%9.4f", d)
 end
 
-print(string.format("%-4s  %-26s  %-10s  %-10s  %s",
-    "#", "x1,y1 -> x2,y2", "Lua", "C++", "match"))
-print(string.rep("-", 68))
-
 local mismatches = 0
+if verbose then
+    print(string.format("%-4s  %-26s  %-10s  %-10s  %s",
+        "#", "x1,y1 -> x2,y2", "Lua", "C++", "match"))
+    print(string.rep("-", 68))
+end
+
 for i, p in ipairs(pairs_list) do
     local l = lua_results[i]
     local c = cpp_results[i]
@@ -141,22 +166,40 @@ for i, p in ipairs(pairs_list) do
         match = "MISMATCH"
         mismatches = mismatches + 1
     end
-    print(string.format("%-4d  %6d,%-6d -> %6d,%-6d  %s  %s  %s",
-        i, p[1], p[2], p[3], p[4], fmt(l), fmt(c), match))
+    if verbose then
+        print(string.format("%-4d  %6d,%-6d -> %6d,%-6d  %s  %s  %s",
+            i, p[1], p[2], p[3], p[4], fmt(l), fmt(c), match))
+    end
 end
 
 -- ---------------------------------------------------------------------------
 -- Timing summary
 -- ---------------------------------------------------------------------------
 local n = #pairs_list
-print(string.rep("-", 68))
-print(string.format("Mismatches: %d / %d", mismatches, n))
-print("")
-print("Lua:")
-print(string.format("  load:       %8.1f ms", lua_load_elapsed * 1000))
-print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
-    lua_elapsed * 1000, lua_elapsed / n * 1000))
-print("")
-print("C++ (per-process, includes startup overhead):")
-print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
-    cpp_elapsed * 1000, cpp_elapsed / n * 1000))
+
+if filter_mismatches then
+    -- Single line, easy to read programmatically
+    print(string.format("Mismatches: %d / %d", mismatches, n))
+elseif filter_timing then
+    -- Just the timing block (what bench_lua51.sh needs, without tail -6)
+    print("Lua:")
+    print(string.format("  load:       %8.1f ms", lua_load_elapsed * 1000))
+    print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
+        lua_elapsed * 1000, lua_elapsed / n * 1000))
+    print("")
+    print("C++ (per-process, includes startup overhead):")
+    print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
+        cpp_elapsed * 1000, cpp_elapsed / n * 1000))
+else
+    print(string.rep("-", 68))
+    print(string.format("Mismatches: %d / %d", mismatches, n))
+    print("")
+    print("Lua:")
+    print(string.format("  load:       %8.1f ms", lua_load_elapsed * 1000))
+    print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
+        lua_elapsed * 1000, lua_elapsed / n * 1000))
+    print("")
+    print("C++ (per-process, includes startup overhead):")
+    print(string.format("  compute:    %8.1f ms total,  %.3f ms/pair avg",
+        cpp_elapsed * 1000, cpp_elapsed / n * 1000))
+end

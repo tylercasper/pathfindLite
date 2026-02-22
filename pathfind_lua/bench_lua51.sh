@@ -8,7 +8,7 @@ export LUA_CPATH
 total=0
 i=1
 while [ "$i" -le "$N" ]; do
-    result=$(${LUA51} bench.lua orderings.lua 2>/dev/null | tail -6)
+    result=$(${LUA51} bench.lua orderings.lua --timing 2>/dev/null)
     echo "=== Run $i ==="
     echo "$result"
     ms=$(echo "$result" | grep "compute:" | head -1 | grep -oE '[0-9]+\.[0-9]+ ms total' | grep -oE '[0-9]+\.[0-9]+')
