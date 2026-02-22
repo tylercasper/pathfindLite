@@ -255,6 +255,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AC (inline outer-loop getTileAndPolyByRefUnsafe, no extra local)| 10  | 11,159   | regression| Double bestRef%DT_TILE_SHIFT computation costs more than CALL+RETURN saved; reverted                   |
 | Test AD (pre-alloc _fnpBuf for findNearestPoly nearestPt) ❌         | 10   | 11,349   | regression| 3 separate SETTABLEs cost more than table alloc savings; reverted                                       |
 | Test AE (bestNode.flags = DT_NODE_CLOSED directly, skip arithmetic) | 10   | 10,917   | neutral   | Nodes in heap always flags=1 when popped; direct assign saves 2 GETTABLE+1 MOD+1 ADD; committed        |
+| Test AF (cache nnt=neighbourNode.total for flag checks) ❌           | 10   | 11,233   | regression| nnt read is unconditional; for new nodes (nf=0), .total was never read before — added GETTABLE; revert |
 
 ### Lua 5.1 Baseline Table (updated)
 
