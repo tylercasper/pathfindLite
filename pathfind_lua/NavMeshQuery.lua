@@ -760,6 +760,8 @@ function M.new(navmesh, maxNodes)
             end
             -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
+            -- Cache bestPoly area cost: constant for all links of this poly
+            local bestPolyAreaCost = filterAreaCost[bestPoly.areaAndtype % 64]
             local li = bestPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local link = bestTile.links[li+1]
@@ -800,7 +802,7 @@ function M.new(navmesh, maxNodes)
                 local np = neighbourNode.pos
                 local bp = bestNode.pos
                 local dx = np[1]-bp[1]; local dy = np[2]-bp[2]; local dz = np[3]-bp[3]
-                local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * filterAreaCost[bestPoly.areaAndtype % 64]
+                local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * bestPolyAreaCost
                 local cost, heuristic
                 if neighbourRef == endRef then
                     local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
