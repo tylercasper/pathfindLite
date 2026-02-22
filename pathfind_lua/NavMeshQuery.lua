@@ -122,9 +122,10 @@ local function newNodePool(maxNodes, hashSize)
 
     function pool:getNode(id, state)
         -- state is always explicitly provided (0 or crossSide); no default needed
-        -- Inline + combine hash: one band() instead of two (dtHashRef + mask)
+        -- Inline + combine hash: one band() instead of two (dtHashRef + mask).
+        -- hi = (id - lo) / 4294967296 is exact (id-lo is divisible); avoids _floor() C call.
         local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + _floor(id / 4294967296) * 1000003, self._hashMask) + 1
+        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, self._hashMask) + 1
         local first  = self.first
         local nodes  = self.nodes
         local nxt    = self.next
@@ -176,7 +177,7 @@ local function newNodePool(maxNodes, hashSize)
 
     function pool:findNode(id, state)
         local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + _floor(id / 4294967296) * 1000003, self._hashMask) + 1
+        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, self._hashMask) + 1
         local nodes  = self.nodes
         local nxt    = self.next
         local i = self.first[bucket]
@@ -495,10 +496,8 @@ function M.new(navmesh, maxNodes)
     -- Signature: (fromPoly, fromTile, toPoly, toTile, link, from, dest)
     -- where 'link' is the link from fromPoly to toPoly, 'from' is fromPoly's ref (for offmesh fallback)
     function q:_writeMidPoint(fromPoly, fromTile, toPoly, toTile, link, from, dest)
-        local fromType = _floor(fromPoly.areaAndtype / 64)
-        local toType   = _floor(toPoly.areaAndtype   / 64)
-        if fromType ~= DT_POLYTYPE_OFFMESH_CONNECTION and
-           toType   ~= DT_POLYTYPE_OFFMESH_CONNECTION then
+        -- areaAndtype >= 64 means type >= 1 (OFFMESH); avoids 2 _floor() C calls
+        if fromPoly.areaAndtype < 64 and toPoly.areaAndtype < 64 then
             -- Use link directly — no need to re-search the link list
             local tverts = fromTile.verts
             local bpv = fromPoly.verts
@@ -535,10 +534,8 @@ function M.new(navmesh, maxNodes)
         end
         if not link then return false end
 
-        local fromType = _floor(fromPoly.areaAndtype / 64)
-        local toType   = _floor(toPoly.areaAndtype   / 64)
-
-        if fromType == DT_POLYTYPE_OFFMESH_CONNECTION then
+        -- areaAndtype >= 64 means type >= 1 (OFFMESH); avoids 2 _floor() C calls
+        if fromPoly.areaAndtype >= 64 then  -- fromType == DT_POLYTYPE_OFFMESH_CONNECTION
             li = fromPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local lk = fromTile.links[li+1]
@@ -554,7 +551,7 @@ function M.new(navmesh, maxNodes)
             return false
         end
 
-        if toType == DT_POLYTYPE_OFFMESH_CONNECTION then
+        if toPoly.areaAndtype >= 64 then  -- toType == DT_POLYTYPE_OFFMESH_CONNECTION
             li = toPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local lk = toTile.links[li+1]
