@@ -250,6 +250,9 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test X (cache _openList.empty/pop/modify/push method refs) ❌      | 10   | 11,524   | regression| SELF opcode = 1 instr (GETTABLE+MOV); replacing with 2 GETLOCALs adds instructions; reverted            |
 | Test Y (cache endPos/bestNodePos/np components as scalars)         | 10   | 10,941   | **-1.2%** | 9 fewer GETTABLE per inner iter; endPosX/Y/Z at fn scope, bnX/Y/Z before inner loop, npX/Y/Z inline    |
 | Test Z (combine OPEN/CLOSED checks into nf~=0) ❌                  | 10   | 11,368   | regression| Fewer opcodes on paper but slower; two separate if-break pairs seem to predict better; reverted         |
+| Test AA (cache neighbourNode.flags once, reuse at nf check) ❌      | 10   | 11,344   | regression| Moving local nf earlier changes register layout of all subsequent inner-loop locals; reverted           |
+| Test AB (inline _writeMidPoint body in flags==0 guard)              | 10   | 11,015   | neutral   | Saves CALL+RETURN per new node but adds ~20 opcodes in flags==0 branch; net zero; reverted             |
+| Test AC (inline outer-loop getTileAndPolyByRefUnsafe, no extra local)| 10  | 11,159   | regression| Double bestRef%DT_TILE_SHIFT computation costs more than CALL+RETURN saved; reverted                   |
 
 ### Lua 5.1 Baseline Table (updated)
 
