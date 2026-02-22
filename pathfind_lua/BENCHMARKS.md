@@ -247,6 +247,8 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test U (inline outer loop tile lookup too) ❌                     | 10   | 11,524   | regression| Extra locals in outer loop scope hurt register layout more than call saved; reverted                    |
 | Test V (cache _nodePool.getNode as local in findPath)             | 10   | 11,258   | neutral   | Saves 1 GETTABLE per inner iter; within noise of baseline                                               |
 | Test W (cache bestNode.pos/cost/_idx before inner link loop)      | 10   | 11,078   | **-1.4%** | 3 fewer GETTABLE per inner iter (bestNode fields constant across link loop); committed                   |
+| Test X (cache _openList.empty/pop/modify/push method refs) ❌      | 10   | 11,524   | regression| SELF opcode = 1 instr (GETTABLE+MOV); replacing with 2 GETLOCALs adds instructions; reverted            |
+| Test Y (cache endPos/bestNodePos/np components as scalars)         | 10   | 10,941   | **-1.2%** | 9 fewer GETTABLE per inner iter; endPosX/Y/Z at fn scope, bnX/Y/Z before inner loop, npX/Y/Z inline    |
 
 ### Lua 5.1 Baseline Table (updated)
 
@@ -259,4 +261,5 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–8 (commit 227c76a)       | 10   | **11,714** | -39.9%     |                                                                    |
 | Sessions 1–9 (commit 346ba13)       | 10   | **11,235** | **-42.4%** | Test T: inline getTileAndPolyByRefUnsafe in findPath inner loop    |
 | Sessions 1–10 (Test W)              | 10   | **11,078** | **-43.2%** | Test W: cache bestNode.pos/cost/_idx before inner link loop        |
+| Sessions 1–11 (Test Y)              | 10   | **10,941** | **-43.9%** | Test Y: cache endPos/bestNodePos/np components as scalars          |
 

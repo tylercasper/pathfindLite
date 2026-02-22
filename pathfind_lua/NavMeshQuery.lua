@@ -753,6 +753,7 @@ function M.new(navmesh, maxNodes)
         local filterExclude    = filter.excludeFlags
         local _navTiles        = _nav._tiles        -- for inlining getTileAndPolyByRefUnsafe
         local _getNode         = _nodePool.getNode  -- cache method ref: saves 1 GETTABLE per inner iter
+        local endPosX = endPos[1]; local endPosY = endPos[2]; local endPosZ = endPos[3]
 
         while not _openList:empty() do
             local bestNode = _openList:pop()
@@ -779,6 +780,7 @@ function M.new(navmesh, maxNodes)
             local bestNodePos  = bestNode.pos      -- cache: saves 1 GETTABLE per inner iteration
             local bestNodeCost = bestNode.cost     -- cache: saves 1-2 GETTABLE per inner iteration
             local bestNodeIdx  = bestNode._idx     -- cache: saves 1 GETTABLE per inner iteration
+            local bnX = bestNodePos[1]; local bnY = bestNodePos[2]; local bnZ = bestNodePos[3]
             local li = bestPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local link = bestTileLinks[li+1]
@@ -820,17 +822,18 @@ function M.new(navmesh, maxNodes)
 
                 -- Inline getCost: dtVdist(pa,pb) * areaCost[curPoly.area]
                 local np = neighbourNode.pos
-                local dx = np[1]-bestNodePos[1]; local dy = np[2]-bestNodePos[2]; local dz = np[3]-bestNodePos[3]
+                local npX = np[1]; local npY = np[2]; local npZ = np[3]
+                local dx = npX-bnX; local dy = npY-bnY; local dz = npZ-bnZ
                 local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * bestPolyAreaCost
                 local cost, heuristic
                 if neighbourRef == endRef then
-                    local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
+                    local dx2 = npX-endPosX; local dy2 = npY-endPosY; local dz2 = npZ-endPosZ
                     local endCost = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * filterAreaCost[neighbourPoly.areaAndtype % 64]
                     cost = bestNodeCost + curCost + endCost
                     heuristic = 0
                 else
                     cost = bestNodeCost + curCost
-                    local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
+                    local dx2 = npX-endPosX; local dy2 = npY-endPosY; local dz2 = npZ-endPosZ
                     heuristic = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * H_SCALE
                 end
 
