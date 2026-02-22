@@ -224,19 +224,19 @@ local function newNodeQueue(capacity)
         size     = 0,
     }
 
-    -- Use 0-based index math but 1-based array storage.
-    -- Each node carries _hidx (0-based heap position) so modify() is O(1) instead of O(n).
+    -- 1-based index math and 1-based array storage: h[1]=root, parent=floor(i/2), children=2i,2i+1.
+    -- Each node carries _hidx (1-based heap position) so modify() is O(1) instead of O(n).
     function q:_bubbleUp(i, node)
         local h = self.heap
-        while i > 0 do
-            local parent = _floor((i-1) / 2)
-            local ph = h[parent+1]
+        while i > 1 do
+            local parent = _floor(i / 2)   -- simpler than (i-1)/2 for 0-based
+            local ph = h[parent]            -- no +1 needed
             if ph.total <= node.total then break end
-            h[i+1] = ph
+            h[i] = ph
             ph._hidx = i   -- update displaced node's heap index
             i = parent
         end
-        h[i+1] = node
+        h[i] = node
         node._hidx = i
     end
 
@@ -245,19 +245,19 @@ local function newNodeQueue(capacity)
         local sz   = self.size
         local ntot = node.total
         while true do
-            local child = i*2 + 1
-            if child >= sz then break end
-            local c1 = h[child+1]
-            if child+1 < sz and c1.total > h[child+2].total then
+            local child = i*2              -- 1-based left child (was i*2+1)
+            if child > sz then break end   -- was child >= sz
+            local c1 = h[child]            -- no +1
+            if child < sz and c1.total > h[child+1].total then   -- right child = child+1
                 child = child + 1
-                c1 = h[child+1]
+                c1 = h[child]
             end
             if ntot <= c1.total then break end
-            h[i+1] = c1
+            h[i] = c1
             c1._hidx = i   -- update displaced node's heap index
             i = child
         end
-        h[i+1] = node
+        h[i] = node
         node._hidx = i
     end
 
@@ -271,14 +271,15 @@ local function newNodeQueue(capacity)
 
     function q:push(node)
         self.size = self.size + 1
-        self:_bubbleUp(self.size - 1, node)
+        self:_bubbleUp(self.size, node)    -- 1-based: last position = new size
     end
 
     function q:pop()
         local result = self.heap[1]
+        local last   = self.heap[self.size]  -- save before decrement
         self.size = self.size - 1
         if self.size > 0 then
-            self:_trickleDown(0, self.heap[self.size+1])
+            self:_trickleDown(1, last)     -- 1-based root; no +1 needed for last
         end
         return result
     end
