@@ -43,9 +43,11 @@ local _pLeft  = {0,0,0}
 local _pRight = {0,0,0}
 
 -- findStraightPath portal apex/left/right buffers (reused every call).
-local _fspApex  = {0,0,0}
-local _fspLeft  = {0,0,0}
-local _fspRight = {0,0,0}
+local _fspApex       = {0,0,0}
+local _fspLeft       = {0,0,0}
+local _fspRight      = {0,0,0}
+-- closestPointOnPolyBoundary destination buffers (no alloc per call).
+local _fspClosestEnd = {0,0,0}
 
 -- Status flags
 local DT_SUCCESS       = 0x40000000
@@ -341,8 +343,8 @@ function M.new(navmesh, maxNodes)
         for i = 1, 256 do sp[i] = {0,0,0} end
     end
 
-    -- closestPointOnPolyBoundary(ref, pos) -> closest
-    function q:closestPointOnPolyBoundary(ref, pos)
+    -- closestPointOnPolyBoundary(ref, pos[, dest]) -> closest (dest if provided, else new table)
+    function q:closestPointOnPolyBoundary(ref, pos, dest)
         local tile, poly = self._nav:getTileAndPolyByRef(ref)
         if not tile then return nil end
 
@@ -359,6 +361,10 @@ function M.new(navmesh, maxNodes)
         local inside = dtDistancePtPolyEdgesSqr(pos, verts, nv, edged, edget)
 
         if inside then
+            if dest then
+                dest[1]=pos[1]; dest[2]=pos[2]; dest[3]=pos[3]
+                return dest
+            end
             return {pos[1], pos[2], pos[3]}
         else
             local dmin = edged[1]; local imin = 1
@@ -370,6 +376,10 @@ function M.new(navmesh, maxNodes)
             -- Inline dtVlerp: eliminates va, vb, closest table allocations
             local v0x = verts[imin*3-2]; local v0y = verts[imin*3-1]; local v0z = verts[imin*3]
             local v1x = verts[vb_idx*3-2]; local v1y = verts[vb_idx*3-1]; local v1z = verts[vb_idx*3]
+            if dest then
+                dest[1]=v0x+(v1x-v0x)*t; dest[2]=v0y+(v1y-v0y)*t; dest[3]=v0z+(v1z-v0z)*t
+                return dest
+            end
             return {v0x+(v1x-v0x)*t, v0y+(v1y-v0y)*t, v0z+(v1z-v0z)*t}
         end
     end
@@ -718,6 +728,8 @@ function M.new(navmesh, maxNodes)
         local lastBestNodeCost = startNode.total
         local outOfNodes = false
         local filterAreaCost   = filter.areaCost   -- cache for inlined getCost
+        local filterInclude    = filter.includeFlags
+        local filterExclude    = filter.excludeFlags
 
         while not _openList:empty() do
             local bestNode = _openList:pop()
@@ -751,7 +763,9 @@ function M.new(navmesh, maxNodes)
                 end
 
                 local neighbourTile, neighbourPoly = _nav:getTileAndPolyByRefUnsafe(neighbourRef)
-                if not filter:passFilter(neighbourRef, neighbourTile, neighbourPoly) then
+                -- Inline passFilter: avoids method call + 2 GETTABLE per neighbor
+                local npf = neighbourPoly.flags
+                if band(npf, filterInclude) == 0 or band(npf, filterExclude) ~= 0 then
                     break
                 end
 
@@ -982,12 +996,13 @@ function M.new(navmesh, maxNodes)
             return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
 
-        local closestStart = self:closestPointOnPolyBoundary(path[1], startPos)
+        -- Write directly into pre-alloc buffers: _fspApex (also portalApex) and _fspClosestEnd
+        local closestStart = self:closestPointOnPolyBoundary(path[1], startPos, _fspApex)
         if not closestStart then
             return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
 
-        local closestEnd = self:closestPointOnPolyBoundary(path[pathSize], endPos)
+        local closestEnd = self:closestPointOnPolyBoundary(path[pathSize], endPos, _fspClosestEnd)
         if not closestEnd then
             return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
@@ -1000,11 +1015,11 @@ function M.new(navmesh, maxNodes)
         end
 
         if pathSize > 1 then
-            -- Use module-level pre-allocated buffers for portal apex/left/right
+            -- Use module-level pre-allocated buffers for portal apex/left/right.
+            -- closestStart IS _fspApex (written by closestPointOnPolyBoundary), so portalApex copy is a no-op.
             local portalApex  = _fspApex
             local portalLeft  = _fspLeft
             local portalRight = _fspRight
-            portalApex[1]=closestStart[1]; portalApex[2]=closestStart[2]; portalApex[3]=closestStart[3]
             portalLeft[1]=closestStart[1]; portalLeft[2]=closestStart[2]; portalLeft[3]=closestStart[3]
             portalRight[1]=closestStart[1]; portalRight[2]=closestStart[2]; portalRight[3]=closestStart[3]
             local apexIndex   = 1
@@ -1025,8 +1040,8 @@ function M.new(navmesh, maxNodes)
                 if i + 1 <= pathSize then
                     local l2, r2, fromType2, toType2 = self:_getPortalPoints(path[i], path[i+1])
                     if not l2 then
-                        -- Failed portal: clamp end to path[i]
-                        local ce2 = self:closestPointOnPolyBoundary(path[i], endPos)
+                        -- Failed portal: clamp end to path[i] (reuse _fspClosestEnd buffer)
+                        local ce2 = self:closestPointOnPolyBoundary(path[i], endPos, _fspClosestEnd)
                         if not ce2 then return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM end
                         closestEnd = ce2
 
