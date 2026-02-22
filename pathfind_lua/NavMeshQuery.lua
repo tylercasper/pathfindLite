@@ -216,7 +216,7 @@ local function newNodeQueue(capacity)
     }
 
     -- Use 0-based index math but 1-based array storage.
-    -- Cache self.heap as local to avoid repeated table field lookup per iteration.
+    -- Each node carries _hidx (0-based heap position) so modify() is O(1) instead of O(n).
     function q:_bubbleUp(i, node)
         local h = self.heap
         while i > 0 do
@@ -224,9 +224,11 @@ local function newNodeQueue(capacity)
             local ph = h[parent+1]
             if ph.total <= node.total then break end
             h[i+1] = ph
+            ph._hidx = i   -- update displaced node's heap index
             i = parent
         end
         h[i+1] = node
+        node._hidx = i
     end
 
     function q:_trickleDown(i, node)
@@ -243,9 +245,11 @@ local function newNodeQueue(capacity)
             end
             if ntot <= c1.total then break end
             h[i+1] = c1
+            c1._hidx = i   -- update displaced node's heap index
             i = child
         end
         h[i+1] = node
+        node._hidx = i
     end
 
     function q:clear() self.size = 0 end
@@ -270,14 +274,9 @@ local function newNodeQueue(capacity)
         return result
     end
 
+    -- O(1) lookup via node._hidx instead of O(n) scan
     function q:modify(node)
-        local h = self.heap
-        for i = 1, self.size do
-            if h[i] == node then
-                self:_bubbleUp(i-1, node)
-                return
-            end
-        end
+        self:_bubbleUp(node._hidx, node)
     end
 
     return q
