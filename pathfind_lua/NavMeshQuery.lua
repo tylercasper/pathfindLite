@@ -776,6 +776,9 @@ function M.new(navmesh, maxNodes)
             -- Cache bestPoly area cost and tile links: both constant for all links of this poly
             local bestPolyAreaCost = filterAreaCost[bestPoly.areaAndtype % 64]
             local bestTileLinks = bestTile.links   -- cache: saves 1 GETTABLE per inner iteration
+            local bestNodePos  = bestNode.pos      -- cache: saves 1 GETTABLE per inner iteration
+            local bestNodeCost = bestNode.cost     -- cache: saves 1-2 GETTABLE per inner iteration
+            local bestNodeIdx  = bestNode._idx     -- cache: saves 1 GETTABLE per inner iteration
             local li = bestPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local link = bestTileLinks[li+1]
@@ -817,17 +820,16 @@ function M.new(navmesh, maxNodes)
 
                 -- Inline getCost: dtVdist(pa,pb) * areaCost[curPoly.area]
                 local np = neighbourNode.pos
-                local bp = bestNode.pos
-                local dx = np[1]-bp[1]; local dy = np[2]-bp[2]; local dz = np[3]-bp[3]
+                local dx = np[1]-bestNodePos[1]; local dy = np[2]-bestNodePos[2]; local dz = np[3]-bestNodePos[3]
                 local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * bestPolyAreaCost
                 local cost, heuristic
                 if neighbourRef == endRef then
                     local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
                     local endCost = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * filterAreaCost[neighbourPoly.areaAndtype % 64]
-                    cost = bestNode.cost + curCost + endCost
+                    cost = bestNodeCost + curCost + endCost
                     heuristic = 0
                 else
-                    cost = bestNode.cost + curCost
+                    cost = bestNodeCost + curCost
                     local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
                     heuristic = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * H_SCALE
                 end
@@ -843,7 +845,7 @@ function M.new(navmesh, maxNodes)
                     break  -- in closed, worse
                 end
 
-                neighbourNode.pidx  = bestNode._idx  -- getNodeIdx inlined: bestNode never nil here
+                neighbourNode.pidx  = bestNodeIdx    -- getNodeIdx inlined: bestNode never nil here
                 neighbourNode.id    = neighbourRef
                 -- clear closed flag (subtract bit 1 if set)
                 if nf % 4 >= 2 then
