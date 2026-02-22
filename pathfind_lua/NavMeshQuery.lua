@@ -843,24 +843,23 @@ function M.new(navmesh, maxNodes)
                 local total = cost + heuristic
 
                 local nf = neighbourNode.flags
-                -- Use arithmetic instead of band() C calls: OPEN=bit0, CLOSED=bit1
-                if nf % 2 ~= 0 and total >= neighbourNode.total then
-                    break  -- in open, worse
-                end
-                if nf % 4 >= 2 and total >= neighbourNode.total then
-                    break  -- in closed, worse
+                -- nf can only be 0 (new), 1 (OPEN), or 2 (CLOSED): use direct comparisons.
+                -- Combined skip check replaces two separate %2/%4 checks (saves 2 MOD opcodes).
+                if nf ~= 0 and total >= neighbourNode.total then
+                    break  -- already in open/closed, worse path
                 end
 
                 neighbourNode.pidx  = bestNodeIdx    -- getNodeIdx inlined: bestNode never nil here
                 -- neighbourNode.id == neighbourRef already (getNode guarantees it); skip redundant write
-                -- clear closed flag (subtract bit 1 if set)
-                if nf % 4 >= 2 then
+                -- clear closed flag: nf>=2 replaces nf%4>=2 (saves 1 MOD opcode)
+                if nf >= 2 then
                     nf = nf - DT_NODE_CLOSED
                 end
                 neighbourNode.cost  = cost
                 neighbourNode.total = total
 
-                if nf % 2 ~= 0 then
+                -- after clearing: nf is 0 (new/was-closed) or 1 (was-open); nf~=0 replaces nf%2~=0 (saves 1 MOD)
+                if nf ~= 0 then
                     neighbourNode.flags = nf
                     _openList:modify(neighbourNode)
                 else
