@@ -256,6 +256,23 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AD (pre-alloc _fnpBuf for findNearestPoly nearestPt) ❌         | 10   | 11,349   | regression| 3 separate SETTABLEs cost more than table alloc savings; reverted                                       |
 | Test AE (bestNode.flags = DT_NODE_CLOSED directly, skip arithmetic) | 10   | 10,917   | neutral   | Nodes in heap always flags=1 when popped; direct assign saves 2 GETTABLE+1 MOD+1 ADD; committed        |
 | Test AF (cache nnt=neighbourNode.total for flag checks) ❌           | 10   | 11,233   | regression| nnt read is unconditional; for new nodes (nf=0), .total was never read before — added GETTABLE; revert |
+| Test AG (short-circuit filterExclude band() when filterExclude=0)   | 10   | 10,839   | **-0.7%** | Eliminates 1 band() C call per inner iter when filterExclude=0 (default); committed                    |
+| Test AH (move local bestRef before endRef check) ❌                  | 10   | 11,149   | regression| Theoretically saves 1 GETTABLE but empirically regressed; run 1 outlier (11,827); reverted            |
+| Test AI (cache node.total in _bubbleUp, mirrors _trickleDown)        | 10   | 10,939   | neutral   | Correct loop-invariant code motion; committed as code quality improvement                              |
+| Test AJ (lookup table for floor(i/2) in _bubbleUp) ❌                | 10   | 11,087   | regression| GETTABLE+OR overhead > _floor C call for small ints; reverted                                          |
+| Test AK (inline passFilter + cache _nav in _queryPolygonsInTile) ❌  | 10   | 11,222   | regression| New locals shift inner loop registers; reverted                                                        |
+| Test AL (simplify getNode hash: drop dead hi-bits term for WoW refs) | 20   | 10,760   | **-0.7%** | WoW refs < 2^32, so (id-lo)/2^32 == 0; saves MOD+SUB+DIV+MUL+ADD per call; committed                 |
+| Test AM (remove redundant neighbourNode.id write in inner loop)       | 10   | 10,607   | **-1.4%** | getNode() guarantees node.id==neighbourRef; the SETTABLE was dead code; committed                     |
+| Test AN (skip pos zeroing in getNode reuse path)                      | 10   | 10,577   | **-0.3%** | _writeMidPoint always sets all 3 pos components; zeros were dead writes; committed                    |
+| Test AO (remove cost/total/pidx resets in getNode reuse path)         | 10   | 10,490   | **-0.8%** | findPath inner loop always writes these before reading for new nodes; committed                       |
+| Test AP (remove dead startNode.id = startRef write)                   | —    | ~10,490  | trivial   | getNode() guarantees node.id==startRef already; committed                                             |
+| Test AQ (replace MOD-based flag checks with direct comparisons) ✅    | 10   | 10,525   | neutral   | nf can only be 0/1/2; nf%2→nf~=0, nf%4>=2→nf>=2; saves 4 MOD opcodes/iter; committed               |
+| Test AR-1 (filterInclude ~= 0xFFFF prefix for band() skip) ❌         | 10   | 10,641   | regression| Extra JMP from `and` operator cancels band() savings; reverted                                        |
+| Test AR-2 (nil sentinel for filterInclude=0xFFFF) ❌                  | 10   | 10,562   | neutral   | nil short-circuits band(); but correctness bug for filterInclude=0 (falsy); reverted                 |
+| Test AS (remove nearestPt alloc from findNearestPoly) ❌              | 20   | 10,868   | regression| Removing 1 alloc/call shifted register layout; 1.1% regression; reverted                             |
+| Test AT (inline getNodeAtIdx in _getPathToNode; pool.nodes[pidx])     | 20   | 10,762   | neutral   | pool.nodes[0]=nil naturally; simpler than method call; committed                                      |
+| Test AU (inline dtPointInPolygon in getPolyHeight; skip _polyVerts)   | 20   | 10,572   | **-1.7%** | Saves nv×6 ops when pos outside poly (common); areaAndtype>=64 skips _floor; committed               |
+| Test AV (inline fillDV×3 + unroll 3-edge loop in closestPtOnDetailEdges; cache pd.triBase) | 20 | 10,518 | **-0.5%** | Saves 3 CALL+RETURN + inner loop + JSEQ/KSEQ/tidx lookups per triangle; committed |
 
 ### Lua 5.1 Baseline Table (updated)
 
@@ -269,4 +286,14 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–9 (commit 346ba13)       | 10   | **11,235** | **-42.4%** | Test T: inline getTileAndPolyByRefUnsafe in findPath inner loop    |
 | Sessions 1–10 (Test W)              | 10   | **11,078** | **-43.2%** | Test W: cache bestNode.pos/cost/_idx before inner link loop        |
 | Sessions 1–11 (Test Y)              | 10   | **10,941** | **-43.9%** | Test Y: cache endPos/bestNodePos/np components as scalars          |
+| Sessions 1–12 (Test AG)             | 10   | **10,839** | **-44.4%** | Test AG: short-circuit filterExclude band() when filterExclude=0   |
+| Sessions 1–13 (Test AL)             | 20   | **10,760** | **-44.8%** | Test AL: simplify getNode hash (drop dead hi-bits term)             |
+| Sessions 1–14 (Test AM)             | 10   | **10,607** | **-45.6%** | Test AM: remove dead neighbourNode.id write in findPath inner loop  |
+| Sessions 1–15 (Test AN)             | 10   | **10,577** | **-45.7%** | Test AN: skip pos zeroing in getNode reuse path                     |
+| Sessions 1–16 (Test AO)             | 10   | **10,490** | **-46.2%** | Test AO: remove cost/total/pidx resets in getNode reuse path        |
+| Sessions 1–17 (Test AP)             | —    | **~10,490**| **-46.2%** | Test AP: remove dead startNode.id = startRef write (trivial)        |
+| Sessions 1–18 (Test AQ)             | 10   | **10,525** | **-46.0%** | Test AQ: replace MOD-based flag checks with direct comparisons      |
+| Sessions 1–19 (Test AT)             | 20   | **10,762** | **-44.8%** | Test AT: inline getNodeAtIdx (neutral; committed for code clarity)  |
+| Sessions 1–20 (Test AU)             | 20   | **10,572** | **-45.8%** | Test AU: inline dtPointInPolygon in getPolyHeight; skip _polyVerts  |
+| Sessions 1–21 (Test AV)             | 20   | **10,518** | **-46.1%** | Test AV: inline fillDV×3 + unroll edge loop in closestPointOnDetailEdges |
 
