@@ -394,9 +394,10 @@ local function closestPointOnDetailEdges(tile, poly, pos, onlyBoundary)
     local polyV    = poly.verts
     local polyVC   = poly.vertCount
     local pvBase   = pd.vertBase
+    local triBase  = pd.triBase
 
     for ti = 0, pd.triCount - 1 do
-        local triIdx = (pd.triBase + ti) * 4 + 1
+        local triIdx = (triBase + ti) * 4 + 1
         local t0 = detailT[triIdx]
         local t1 = detailT[triIdx+1]
         local t2 = detailT[triIdx+2]
@@ -404,27 +405,63 @@ local function closestPointOnDetailEdges(tile, poly, pos, onlyBoundary)
 
         if not (onlyBoundary and band(t3, 0x15) == 0) then
 
-        fillDV(_detailTV1, t0, tileV, detailV, polyV, polyVC, pvBase)
-        fillDV(_detailTV2, t1, tileV, detailV, polyV, polyVC, pvBase)
-        fillDV(_detailTV3, t2, tileV, detailV, polyV, polyVC, pvBase)
+        -- Inline fillDV × 3: saves 3 CALL+RETURN pairs per triangle
+        if t0 < polyVC then
+            local vi = polyV[t0+1]
+            _detailTV1[1]=tileV[vi*3+1]; _detailTV1[2]=tileV[vi*3+2]; _detailTV1[3]=tileV[vi*3+3]
+        else
+            local dvi = pvBase + (t0 - polyVC)
+            _detailTV1[1]=detailV[dvi*3+1]; _detailTV1[2]=detailV[dvi*3+2]; _detailTV1[3]=detailV[dvi*3+3]
+        end
+        if t1 < polyVC then
+            local vi = polyV[t1+1]
+            _detailTV2[1]=tileV[vi*3+1]; _detailTV2[2]=tileV[vi*3+2]; _detailTV2[3]=tileV[vi*3+3]
+        else
+            local dvi = pvBase + (t1 - polyVC)
+            _detailTV2[1]=detailV[dvi*3+1]; _detailTV2[2]=detailV[dvi*3+2]; _detailTV2[3]=detailV[dvi*3+3]
+        end
+        if t2 < polyVC then
+            local vi = polyV[t2+1]
+            _detailTV3[1]=tileV[vi*3+1]; _detailTV3[2]=tileV[vi*3+2]; _detailTV3[3]=tileV[vi*3+3]
+        else
+            local dvi = pvBase + (t2 - polyVC)
+            _detailTV3[1]=detailV[dvi*3+1]; _detailTV3[2]=detailV[dvi*3+2]; _detailTV3[3]=detailV[dvi*3+3]
+        end
 
-        -- 3 edges: (TV3→TV1, bits 4-5), (TV1→TV2, bits 0-1), (TV2→TV3, bits 2-3)
-        _detailTidx[1] = t0; _detailTidx[2] = t1; _detailTidx[3] = t2
-        for ei = 1, 3 do
-            local j1 = DETAIL_JSEQ[ei]
-            local k1 = DETAIL_KSEQ[ei]
-            local isBdry = band(rshift(t3, (j1-1)*2), 1) == 1
-            if isBdry or (not onlyBoundary and _detailTidx[j1] < _detailTidx[k1]) then
-                local d, t = dtDistancePtSegSqr2D(pos, _detailTV[j1], _detailTV[k1])
-                if d < dmin then
-                    dmin = d; tmin_out = t
-                    local pj = _detailTV[j1]; local pk = _detailTV[k1]
-                    _detailPmin[1]=pj[1]; _detailPmin[2]=pj[2]; _detailPmin[3]=pj[3]
-                    _detailPmax[1]=pk[1]; _detailPmax[2]=pk[2]; _detailPmax[3]=pk[3]
-                    pmin_found = true
-                end
+        -- Unrolled 3-edge loop: eliminates DETAIL_JSEQ/KSEQ GETTABLEs, _detailTidx writes,
+        -- inner loop overhead, and _detailTV[j] indexing. Edge bit layout in t3:
+        --   bits 0-1: TV1→TV2, bits 2-3: TV2→TV3, bits 4-5: TV3→TV1
+        -- Edge (TV3→TV1): boundary bit 4; interior when t2 < t0
+        if band(rshift(t3, 4), 1) == 1 or (not onlyBoundary and t2 < t0) then
+            local d, t = dtDistancePtSegSqr2D(pos, _detailTV3, _detailTV1)
+            if d < dmin then
+                dmin = d; tmin_out = t
+                _detailPmin[1]=_detailTV3[1]; _detailPmin[2]=_detailTV3[2]; _detailPmin[3]=_detailTV3[3]
+                _detailPmax[1]=_detailTV1[1]; _detailPmax[2]=_detailTV1[2]; _detailPmax[3]=_detailTV1[3]
+                pmin_found = true
             end
         end
+        -- Edge (TV1→TV2): boundary bit 0; interior when t0 < t1
+        if band(t3, 1) == 1 or (not onlyBoundary and t0 < t1) then
+            local d, t = dtDistancePtSegSqr2D(pos, _detailTV1, _detailTV2)
+            if d < dmin then
+                dmin = d; tmin_out = t
+                _detailPmin[1]=_detailTV1[1]; _detailPmin[2]=_detailTV1[2]; _detailPmin[3]=_detailTV1[3]
+                _detailPmax[1]=_detailTV2[1]; _detailPmax[2]=_detailTV2[2]; _detailPmax[3]=_detailTV2[3]
+                pmin_found = true
+            end
+        end
+        -- Edge (TV2→TV3): boundary bit 2; interior when t1 < t2
+        if band(rshift(t3, 2), 1) == 1 or (not onlyBoundary and t1 < t2) then
+            local d, t = dtDistancePtSegSqr2D(pos, _detailTV2, _detailTV3)
+            if d < dmin then
+                dmin = d; tmin_out = t
+                _detailPmin[1]=_detailTV2[1]; _detailPmin[2]=_detailTV2[2]; _detailPmin[3]=_detailTV2[3]
+                _detailPmax[1]=_detailTV3[1]; _detailPmax[2]=_detailTV3[2]; _detailPmax[3]=_detailTV3[3]
+                pmin_found = true
+            end
+        end
+
         end -- not (onlyBoundary and band(t3,0x15)==0)
     end
 
@@ -961,10 +998,11 @@ function M.new(paramsData)
         local detailTris = tile.detailTris
         local detailVerts = tile.detailVerts
         local pdVertBase = pd.vertBase
+        local pdTriBase  = pd.triBase
 
         -- Find height from detail triangles
         for ti = 0, pd.triCount - 1 do
-            local tidx = (pd.triBase + ti) * 4 + 1
+            local tidx = (pdTriBase + ti) * 4 + 1
             fillDV(_triVa, detailTris[tidx],   tileVerts, detailVerts, polyV, nv, pdVertBase)
             fillDV(_triVb, detailTris[tidx+1], tileVerts, detailVerts, polyV, nv, pdVertBase)
             fillDV(_triVc, detailTris[tidx+2], tileVerts, detailVerts, polyV, nv, pdVertBase)
