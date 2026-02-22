@@ -201,6 +201,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–5 (commit 18542f4)       | 10   | **13,182**  | **-32.4%**| All optimizations through Test D (slab/connection alloc elimination)        |
 | Sessions 1–6 (commit 80af820)       | 10   | **12,711**  | **-34.8%**| +Tests E (neutral) and F (findStraightPath pre-alloc)                       |
 | Sessions 1–7 (commit ac650cf)       | 10   | **11,774**  | **-39.6%**| +Tests G (neutral), H (-4.3% O(1) heap modify), I (neutral), J (-2.4% hash) |
+| Sessions 1–8 (commit 227c76a)       | 10   | **11,714**  | **-39.9%**| +Tests K (regression/reverted), L (neutral), M (-1.5% _floor elimination)   |
 
 ### Session 5 Lua 5.1 Detail
 
@@ -227,4 +228,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test H (O(1) heap modify via node._hidx tracking)       | 10   | 12,083   | **-4.3%** | _bubbleUp/_trickleDown store _hidx; modify() uses node._hidx directly; no O(n) scan        |
 | Test I (inline decodePolyId in getTileAndPolyByRefUnsafe)| 10  | 12,068   | neutral   | Skip salt computation; avoids decodePolyId function call; not measurable at this scale      |
 | Test J (combine hash in getNode/findNode, 1 band() call)| 10   | 11,774   | **-2.4%** | band(band(x,0xFFFFFFFF),mask)→band(x,mask); eliminates dtHashRef call per getNode invoc.   |
+| Test K (fast path branch in getNode for hi=0)           | 10   | 12,068   | regression| Branch overhead exceeded savings; reverted                                                 |
+| Test L (unsafe lookup in _getPortalPoints + pathBuf)    | 10   | 11,897   | neutral   | Valid path refs → unsafe tile lookup; pre-alloc pathBuf in _getPathToNode                  |
+| Test M (eliminate _floor for type checks + hash hi)     | 10   | 11,714   | **-1.5%** | areaAndtype>=64 replaces _floor(areaAndtype/64); (id-lo)/4294967296 avoids _floor in hash  |
 
