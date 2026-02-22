@@ -231,11 +231,12 @@ local function newNodeQueue(capacity)
     -- 1-based index math and 1-based array storage: h[1]=root, parent=floor(i/2), children=2i,2i+1.
     -- Each node carries _hidx (1-based heap position) so modify() is O(1) instead of O(n).
     function q:_bubbleUp(i, node)
-        local h = self.heap
+        local h    = self.heap
+        local ntot = node.total  -- cache loop-invariant: saves 1 GETTABLE per iteration
         while i > 1 do
             local parent = _floor(i / 2)
             local ph = h[parent]            -- no +1 needed
-            if ph.total <= node.total then break end
+            if ph.total <= ntot then break end
             h[i] = ph
             ph._hidx = i   -- update displaced node's heap index
             i = parent
