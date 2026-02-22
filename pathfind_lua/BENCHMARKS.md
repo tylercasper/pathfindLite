@@ -253,6 +253,8 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AA (cache neighbourNode.flags once, reuse at nf check) ❌      | 10   | 11,344   | regression| Moving local nf earlier changes register layout of all subsequent inner-loop locals; reverted           |
 | Test AB (inline _writeMidPoint body in flags==0 guard)              | 10   | 11,015   | neutral   | Saves CALL+RETURN per new node but adds ~20 opcodes in flags==0 branch; net zero; reverted             |
 | Test AC (inline outer-loop getTileAndPolyByRefUnsafe, no extra local)| 10  | 11,159   | regression| Double bestRef%DT_TILE_SHIFT computation costs more than CALL+RETURN saved; reverted                   |
+| Test AD (pre-alloc _fnpBuf for findNearestPoly nearestPt) ❌         | 10   | 11,349   | regression| 3 separate SETTABLEs cost more than table alloc savings; reverted                                       |
+| Test AE (bestNode.flags = DT_NODE_CLOSED directly, skip arithmetic) | 10   | 10,917   | neutral   | Nodes in heap always flags=1 when popped; direct assign saves 2 GETTABLE+1 MOD+1 ADD; committed        |
 
 ### Lua 5.1 Baseline Table (updated)
 

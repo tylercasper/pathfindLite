@@ -757,8 +757,8 @@ function M.new(navmesh, maxNodes)
 
         while not _openList:empty() do
             local bestNode = _openList:pop()
-            -- clear OPEN bit (bit 0), set CLOSED (bit 1) — avoids band() C call
-            bestNode.flags = bestNode.flags - (bestNode.flags % 2) + DT_NODE_CLOSED
+            -- Nodes in heap always have flags=DT_NODE_OPEN(1) when popped; set CLOSED directly
+            bestNode.flags = DT_NODE_CLOSED
 
             if bestNode.id == endRef then
                 lastBestNode = bestNode
