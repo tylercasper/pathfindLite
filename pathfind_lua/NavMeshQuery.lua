@@ -1,7 +1,8 @@
 -- NavMeshQuery.lua
 -- Port of DetourNavMeshQuery.cpp to Lua 5.1
 
-local nm = require("NavMesh")
+local nm   = require("NavMesh")
+local band = require("bit").band
 
 local DT_NULL_LINK    = nm.DT_NULL_LINK
 local DT_EXT_LINK     = nm.DT_EXT_LINK
@@ -32,6 +33,15 @@ local dtDistancePtPolyEdgesSqr = nm.dtDistancePtPolyEdgesSqr
 local dtIntersectSegSeg2D       = nm.dtIntersectSegSeg2D
 local dtIntersectSegmentPoly2D  = nm.dtIntersectSegmentPoly2D
 
+-- Cache stdlib lookups as locals (avoids global table lookup in hot paths)
+local _floor = math.floor
+local _sqrt  = math.sqrt
+
+-- Module-level portal buffers (safe: Lua is single-threaded, no re-entrancy).
+-- _getPortalPointsFull writes into these; callers read them before the next call.
+local _pLeft  = {0,0,0}
+local _pRight = {0,0,0}
+
 -- Status flags
 local DT_SUCCESS       = 0x40000000
 local DT_FAILURE       = 0x80000000
@@ -59,20 +69,12 @@ local M = {}
 
 -- ---------------------------------------------------------------------------
 -- Hash function for poly refs (64-bit aware)
--- Based on Thomas Wang hash for large integers
 -- ---------------------------------------------------------------------------
 local function dtHashRef(a)
-    -- For Lua doubles representing 64-bit values, keep it simple:
-    -- Use a combination of lower and upper 32 bits
     local lo = a % 4294967296
-    local hi = math.floor(a / 4294967296) % 4294967296
-    -- Simple integer hash
-    local v = lo + hi * 1000003
-    v = v % 4294967296
-    v = v + (65536 - v % 65536) * 65536  -- mix high bits
-    v = v % 4294967296
-    -- Final mix
-    return v % 4294967296
+    local hi = _floor(a / 4294967296)
+    -- band(x, 0xFFFFFFFF) is faster than x % 4294967296 for the final reduction
+    return band(lo * 2654435761 + hi * 1000003, 0xFFFFFFFF)
 end
 
 -- ---------------------------------------------------------------------------
@@ -85,14 +87,19 @@ local function newNodePool(maxNodes, hashSize)
         next      = {},     -- node index -> next node in chain
         maxNodes  = maxNodes,
         hashSize  = hashSize,
+        _hashMask = hashSize - 1,  -- power-of-2 mask for band() bucket reduction
         nodeCount = 0,
+        _dirty    = {},     -- dirty bucket list for O(k) clear
+        _dirtyN   = 0,
     }
     -- Initialize buckets to 0 (empty)
     for i = 1, hashSize do pool.first[i] = 0 end
     for i = 1, maxNodes do pool.next[i]  = 0 end
 
     function pool:clear()
-        for i = 1, self.hashSize do self.first[i] = 0 end
+        local d, n = self._dirty, self._dirtyN
+        for i = 1, n do self.first[d[i]] = 0 end
+        self._dirtyN = 0
         self.nodeCount = 0
     end
 
@@ -107,55 +114,75 @@ local function newNodePool(maxNodes, hashSize)
     end
 
     function pool:getNode(id, state)
-        state = state or 0
-        local bucket = dtHashRef(id) % self.hashSize + 1
-        local i = self.first[bucket]
+        -- state is always explicitly provided (0 or crossSide); no default needed
+        local bucket = band(dtHashRef(id), self._hashMask) + 1
+        local first  = self.first
+        local nodes  = self.nodes
+        local nxt    = self.next
+        local i = first[bucket]
         while i ~= 0 do
-            local n = self.nodes[i]
+            local n = nodes[i]
             if n.id == id and n.state == state then
                 return n
             end
-            i = self.next[i]
+            i = nxt[i]
         end
 
         if self.nodeCount >= self.maxNodes then
             return nil
         end
 
+        -- Track dirty bucket for fast clear
+        if first[bucket] == 0 then
+            local dn = self._dirtyN + 1
+            self._dirtyN = dn
+            self._dirty[dn] = bucket
+        end
+
         self.nodeCount = self.nodeCount + 1
         local idx = self.nodeCount
-        local node = {
-            _idx   = idx,
-            pos    = {0,0,0},
-            cost   = 0,
-            total  = 0,
-            pidx   = 0,
-            state  = state,
-            flags  = 0,
-            id     = id,
-        }
-        self.nodes[idx] = node
-        self.next[idx]  = self.first[bucket]
-        self.first[bucket] = idx
+        -- Reuse existing table to reduce allocation pressure
+        local node = nodes[idx]
+        if node then
+            local p = node.pos; p[1]=0; p[2]=0; p[3]=0
+            node.cost=0; node.total=0; node.pidx=0
+            node.state=state; node.flags=0; node.id=id
+        else
+            node = {
+                _idx   = idx,
+                pos    = {0,0,0},
+                cost   = 0,
+                total  = 0,
+                pidx   = 0,
+                state  = state,
+                flags  = 0,
+                id     = id,
+            }
+            nodes[idx] = node
+        end
+        nxt[idx]     = first[bucket]
+        first[bucket] = idx
         return node
     end
 
     function pool:findNode(id, state)
-        local bucket = dtHashRef(id) % self.hashSize + 1
+        local bucket = band(dtHashRef(id), self._hashMask) + 1
+        local nodes  = self.nodes
+        local nxt    = self.next
         local i = self.first[bucket]
         while i ~= 0 do
-            local n = self.nodes[i]
+            local n = nodes[i]
             if n.id == id and n.state == state then
                 return n
             end
-            i = self.next[i]
+            i = nxt[i]
         end
         return nil
     end
 
     function pool:findNodes(id, maxN)
         local result = {}
-        local bucket = dtHashRef(id) % self.hashSize + 1
+        local bucket = band(dtHashRef(id), self._hashMask) + 1
         local i = self.first[bucket]
         while i ~= 0 do
             local n = self.nodes[i]
@@ -181,41 +208,37 @@ local function newNodeQueue(capacity)
         size     = 0,
     }
 
-    local function bubbleUp(q, i, node)
-        while i > 1 do
-            local parent = math.floor((i-1)/2) + 1  -- 1-based parent: floor((i-2)/2)+1
-            -- Actually: for 1-based heap, parent of i is floor(i/2)
-            -- Let's use 0-based internally:
-            -- We'll handle this below
-            break
-        end
-        -- Redo with 0-based indexing internally (heap[] is 1-based storage but 0-based logic)
-    end
-
-    -- Use 0-based index math but 1-based array storage
+    -- Use 0-based index math but 1-based array storage.
+    -- Cache self.heap as local to avoid repeated table field lookup per iteration.
     function q:_bubbleUp(i, node)
+        local h = self.heap
         while i > 0 do
-            local parent = math.floor((i-1) / 2)
-            if self.heap[parent+1].total <= node.total then break end
-            self.heap[i+1] = self.heap[parent+1]
+            local parent = _floor((i-1) / 2)
+            local ph = h[parent+1]
+            if ph.total <= node.total then break end
+            h[i+1] = ph
             i = parent
         end
-        self.heap[i+1] = node
+        h[i+1] = node
     end
 
     function q:_trickleDown(i, node)
+        local h    = self.heap
+        local sz   = self.size
+        local ntot = node.total
         while true do
             local child = i*2 + 1
-            if child >= self.size then break end
-            if child+1 < self.size and
-               self.heap[child+1].total > self.heap[child+2].total then
+            if child >= sz then break end
+            local c1 = h[child+1]
+            if child+1 < sz and c1.total > h[child+2].total then
                 child = child + 1
+                c1 = h[child+1]
             end
-            if node.total <= self.heap[child+1].total then break end
-            self.heap[i+1] = self.heap[child+1]
+            if ntot <= c1.total then break end
+            h[i+1] = c1
             i = child
         end
-        self.heap[i+1] = node
+        h[i+1] = node
     end
 
     function q:clear() self.size = 0 end
@@ -241,8 +264,9 @@ local function newNodeQueue(capacity)
     end
 
     function q:modify(node)
+        local h = self.heap
         for i = 1, self.size do
-            if self.heap[i] == node then
+            if h[i] == node then
                 self:_bubbleUp(i-1, node)
                 return
             end
@@ -265,19 +289,6 @@ local function newFilter()
 
     function f:passFilter(ref, tile, poly)
         local flags = poly.flags
-        -- (flags & includeFlags) != 0 && (flags & excludeFlags) == 0
-        -- Bitwise AND simulation using modular arithmetic
-        local function band(a, b)
-            local result = 0
-            local bit = 1
-            while bit <= a or bit <= b do
-                if (a % (bit*2)) >= bit and (b % (bit*2)) >= bit then
-                    result = result + bit
-                end
-                bit = bit * 2
-            end
-            return result
-        end
         return band(flags, self.includeFlags) ~= 0 and band(flags, self.excludeFlags) == 0
     end
 
@@ -299,9 +310,19 @@ function M.new(navmesh, maxNodes)
     local q = {
         _nav          = navmesh,
         _maxNodes     = maxNodes,
-        _nodePool     = newNodePool(maxNodes, nextPow2(math.max(1, math.floor(maxNodes/4)))),
+        _nodePool     = newNodePool(maxNodes, nextPow2(math.max(1, _floor(maxNodes/4)))),
         _tinyNodePool = newNodePool(64, 32),
         _openList     = newNodeQueue(maxNodes),
+        -- Pre-allocated reusable buffers to reduce GC pressure
+        _qBmin        = {0,0,0},   -- for queryPolygons bmin
+        _qBmax        = {0,0,0},   -- for queryPolygons bmax
+        _qpTmp        = {},        -- for queryPolygonsInTile output
+        _qPolys       = {},        -- for queryPolygons polys output
+        _qpiTmp       = {},        -- for _queryPolygonsInTile internal
+        -- closestPointOnPolyBoundary scratch (max 6 verts = 18 floats each)
+        _cbVerts      = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
+        _cbEdged      = {0,0,0,0,0,0},
+        _cbEdget      = {0,0,0,0,0,0},
     }
 
     -- closestPointOnPolyBoundary(ref, pos) -> closest
@@ -309,7 +330,7 @@ function M.new(navmesh, maxNodes)
         local tile, poly = self._nav:getTileAndPolyByRef(ref)
         if not tile then return nil end
 
-        local verts = {}
+        local verts = self._cbVerts
         local nv = poly.vertCount
         for k = 1, nv do
             local vi = poly.verts[k]
@@ -318,7 +339,7 @@ function M.new(navmesh, maxNodes)
             verts[k*3  ] = tile.verts[vi*3+3]
         end
 
-        local edged = {}; local edget = {}
+        local edged = self._cbEdged; local edget = self._cbEdget
         local inside = dtDistancePtPolyEdgesSqr(pos, verts, nv, edged, edget)
 
         if inside then
@@ -328,12 +349,12 @@ function M.new(navmesh, maxNodes)
             for k = 2, nv do
                 if edged[k] < dmin then dmin = edged[k]; imin = k end
             end
-            local va = {verts[imin*3-2], verts[imin*3-1], verts[imin*3]}
+            local t = edget[imin]
             local vb_idx = (imin % nv) + 1
-            local vb = {verts[vb_idx*3-2], verts[vb_idx*3-1], verts[vb_idx*3]}
-            local closest = {0,0,0}
-            dtVlerp(closest, va, vb, edget[imin])
-            return closest
+            -- Inline dtVlerp: eliminates va, vb, closest table allocations
+            local v0x = verts[imin*3-2]; local v0y = verts[imin*3-1]; local v0z = verts[imin*3]
+            local v1x = verts[vb_idx*3-2]; local v1y = verts[vb_idx*3-1]; local v1z = verts[vb_idx*3]
+            return {v0x+(v1x-v0x)*t, v0y+(v1y-v0y)*t, v0z+(v1z-v0z)*t}
         end
     end
 
@@ -347,8 +368,8 @@ function M.new(navmesh, maxNodes)
 
     -- queryPolygonsInTile (delegates to navmesh with filter)
     function q:_queryPolygonsInTile(tile, qmin, qmax, filter, outPolys)
-        -- We collect refs from navmesh and filter here
-        local tmpPolys = {}
+        -- Reuse pre-allocated buffer to avoid per-call allocation
+        local tmpPolys = self._qpiTmp
         local n = self._nav:queryPolygonsInTile(tile, qmin, qmax, tmpPolys, 512)
         local count = 0
         for k = 1, n do
@@ -364,19 +385,22 @@ function M.new(navmesh, maxNodes)
 
     -- queryPolygons(center, halfExtents, filter) -> polys array, count
     function q:queryPolygons(center, halfExtents, filter)
-        local bmin = {center[1]-halfExtents[1], center[2]-halfExtents[2], center[3]-halfExtents[3]}
-        local bmax = {center[1]+halfExtents[1], center[2]+halfExtents[2], center[3]+halfExtents[3]}
+        -- Use pre-allocated bmin/bmax/polys buffers to avoid allocation
+        local bmin = self._qBmin
+        bmin[1] = center[1]-halfExtents[1]; bmin[2] = center[2]-halfExtents[2]; bmin[3] = center[3]-halfExtents[3]
+        local bmax = self._qBmax
+        bmax[1] = center[1]+halfExtents[1]; bmax[2] = center[2]+halfExtents[2]; bmax[3] = center[3]+halfExtents[3]
 
         local minx, miny = self._nav:calcTileLoc(bmin)
         local maxx, maxy = self._nav:calcTileLoc(bmax)
 
-        local polys = {}; local total = 0
+        local polys = self._qPolys; local total = 0
+        local tmp   = self._qpTmp
         for ty = miny, maxy do
             for tx = minx, maxx do
-                local neis = self._nav:getTilesAt(tx, ty)
-                for _, tile in ipairs(neis) do
-                    local tmp = {}
-                    local cnt = self:_queryPolygonsInTile(tile, bmin, bmax, filter, tmp)
+                local neis, nc = self._nav:getTilesAt(tx, ty)
+                for ti = 1, nc do
+                    local cnt = self:_queryPolygonsInTile(neis[ti], bmin, bmax, filter, tmp)
                     for k = 1, cnt do
                         total = total + 1
                         polys[total] = tmp[k]
@@ -397,17 +421,20 @@ function M.new(navmesh, maxNodes)
         for k = 1, polyCount do
             local ref = polys[k]
             local closestPtPoly, posOverPoly = self:closestPointOnPoly(ref, center)
-            if not closestPtPoly then goto continue_k end
+            if closestPtPoly then
 
-            local diff = {center[1]-closestPtPoly[1], center[2]-closestPtPoly[2], center[3]-closestPtPoly[3]}
+            -- Inline diff computation to avoid {x,y,z} allocation
+            local d0 = center[1]-closestPtPoly[1]
+            local d1 = center[2]-closestPtPoly[2]
+            local d2 = center[3]-closestPtPoly[3]
             local d
             if posOverPoly then
                 -- Favor polys the point is over, with climb height consideration
                 local tile, _ = self._nav:getTileAndPolyByRefUnsafe(ref)
-                d = dtAbs(diff[2]) - tile.header.walkableClimb
+                d = dtAbs(d1) - tile.header.walkableClimb
                 d = d > 0 and d*d or 0
             else
-                d = dtVlenSqr(diff)
+                d = d0*d0 + d1*d1 + d2*d2
             end
 
             if d < nearestDistSqr then
@@ -415,7 +442,7 @@ function M.new(navmesh, maxNodes)
                 nearestDistSqr = d
                 nearest = ref
             end
-            ::continue_k::
+            end -- closestPtPoly
         end
 
         return nearest, nearestPt
@@ -423,12 +450,44 @@ function M.new(navmesh, maxNodes)
 
     -- getEdgeMidPoint (two forms)
     function q:_getEdgeMidPointFull(from, fromPoly, fromTile, to, toPoly, toTile)
-        local left, right = self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile)
-        if not left then return nil end
-        return {(left[1]+right[1])*0.5, (left[2]+right[2])*0.5, (left[3]+right[3])*0.5}
+        if not self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile) then return nil end
+        return {(_pLeft[1]+_pRight[1])*0.5, (_pLeft[2]+_pRight[2])*0.5, (_pLeft[3]+_pRight[3])*0.5}
+    end
+
+    -- _writeMidPoint: writes portal midpoint into dest using the already-found link.
+    -- Caller passes the link directly (avoids redundant link search for GROUND polys).
+    -- Signature: (fromPoly, fromTile, toPoly, toTile, link, from, dest)
+    -- where 'link' is the link from fromPoly to toPoly, 'from' is fromPoly's ref (for offmesh fallback)
+    function q:_writeMidPoint(fromPoly, fromTile, toPoly, toTile, link, from, dest)
+        local fromType = _floor(fromPoly.areaAndtype / 64)
+        local toType   = _floor(toPoly.areaAndtype   / 64)
+        if fromType ~= DT_POLYTYPE_OFFMESH_CONNECTION and
+           toType   ~= DT_POLYTYPE_OFFMESH_CONNECTION then
+            -- Use link directly — no need to re-search the link list
+            local tverts = fromTile.verts
+            local bpv = fromPoly.verts
+            local v0i = bpv[link.edge + 1]
+            local v1i = bpv[((link.edge + 1) % fromPoly.vertCount) + 1]
+            local v0x = tverts[v0i*3+1]; local v0y = tverts[v0i*3+2]; local v0z = tverts[v0i*3+3]
+            local v1x = tverts[v1i*3+1]; local v1y = tverts[v1i*3+2]; local v1z = tverts[v1i*3+3]
+            if link.side ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
+                local s = 1.0/255.0
+                local tmin = link.bmin*s; local tmax = link.bmax*s
+                dest[1]=(v0x+(v1x-v0x)*tmin + v0x+(v1x-v0x)*tmax)*0.5
+                dest[2]=(v0y+(v1y-v0y)*tmin + v0y+(v1y-v0y)*tmax)*0.5
+                dest[3]=(v0z+(v1z-v0z)*tmin + v0z+(v1z-v0z)*tmax)*0.5
+            else
+                dest[1]=(v0x+v1x)*0.5; dest[2]=(v0y+v1y)*0.5; dest[3]=(v0z+v1z)*0.5
+            end
+            return
+        end
+        -- Offmesh fallback: link.ref is the neighbour ref
+        local mid = self:_getEdgeMidPointFull(from, fromPoly, fromTile, link.ref, toPoly, toTile)
+        if mid then dtVcopy(dest, mid) end
     end
 
     -- getPortalPoints (full form with tiles/polys)
+    -- Writes results into module-level _pLeft/_pRight; returns true/false (no table allocs).
     function q:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile)
         -- Find link from -> to
         local link = nil
@@ -438,25 +497,25 @@ function M.new(navmesh, maxNodes)
             if lk.ref == to then link = lk; break end
             li = lk.next
         end
-        if not link then return nil, nil end
+        if not link then return false end
 
-        local fromType = math.floor(fromPoly.areaAndtype / 64)
-        local toType   = math.floor(toPoly.areaAndtype   / 64)
+        local fromType = _floor(fromPoly.areaAndtype / 64)
+        local toType   = _floor(toPoly.areaAndtype   / 64)
 
         if fromType == DT_POLYTYPE_OFFMESH_CONNECTION then
             li = fromPoly.firstLink
             while li ~= DT_NULL_LINK do
                 local lk = fromTile.links[li+1]
                 if lk.ref == to then
-                    local v = lk.edge
-                    local vi = fromPoly.verts[v+1]
-                    local left  = {fromTile.verts[vi*3+1], fromTile.verts[vi*3+2], fromTile.verts[vi*3+3]}
-                    local right = {left[1], left[2], left[3]}
-                    return left, right
+                    local vi = fromPoly.verts[lk.edge+1]
+                    local vx = fromTile.verts[vi*3+1]; local vy = fromTile.verts[vi*3+2]; local vz = fromTile.verts[vi*3+3]
+                    _pLeft[1]=vx; _pLeft[2]=vy; _pLeft[3]=vz
+                    _pRight[1]=vx; _pRight[2]=vy; _pRight[3]=vz
+                    return true
                 end
                 li = lk.next
             end
-            return nil, nil
+            return false
         end
 
         if toType == DT_POLYTYPE_OFFMESH_CONNECTION then
@@ -464,47 +523,49 @@ function M.new(navmesh, maxNodes)
             while li ~= DT_NULL_LINK do
                 local lk = toTile.links[li+1]
                 if lk.ref == from then
-                    local v = lk.edge
-                    local vi = toPoly.verts[v+1]
-                    local left  = {toTile.verts[vi*3+1], toTile.verts[vi*3+2], toTile.verts[vi*3+3]}
-                    local right = {left[1], left[2], left[3]}
-                    return left, right
+                    local vi = toPoly.verts[lk.edge+1]
+                    local vx = toTile.verts[vi*3+1]; local vy = toTile.verts[vi*3+2]; local vz = toTile.verts[vi*3+3]
+                    _pLeft[1]=vx; _pLeft[2]=vy; _pLeft[3]=vz
+                    _pRight[1]=vx; _pRight[2]=vy; _pRight[3]=vz
+                    return true
                 end
                 li = lk.next
             end
-            return nil, nil
+            return false
         end
 
         -- Normal portal: edge e goes from vertex e to vertex (e+1)%nv
         local v0i = fromPoly.verts[link.edge + 1]
         local v1i = fromPoly.verts[((link.edge + 1) % fromPoly.vertCount) + 1]
-        local left  = {fromTile.verts[v0i*3+1], fromTile.verts[v0i*3+2], fromTile.verts[v0i*3+3]}
-        local right = {fromTile.verts[v1i*3+1], fromTile.verts[v1i*3+2], fromTile.verts[v1i*3+3]}
+        local tv = fromTile.verts
+        local v0x = tv[v0i*3+1]; local v0y = tv[v0i*3+2]; local v0z = tv[v0i*3+3]
+        local v1x = tv[v1i*3+1]; local v1y = tv[v1i*3+2]; local v1z = tv[v1i*3+3]
 
         if link.side ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
             local s = 1.0/255.0
-            local tmin = link.bmin * s
-            local tmax = link.bmax * s
-            local lv = {fromTile.verts[v0i*3+1], fromTile.verts[v0i*3+2], fromTile.verts[v0i*3+3]}
-            local rv = {fromTile.verts[v1i*3+1], fromTile.verts[v1i*3+2], fromTile.verts[v1i*3+3]}
-            dtVlerp(left,  lv, rv, tmin)
-            dtVlerp(right, lv, rv, tmax)
+            local tmin = link.bmin * s; local tmax = link.bmax * s
+            _pLeft[1]  = v0x+(v1x-v0x)*tmin; _pLeft[2]  = v0y+(v1y-v0y)*tmin; _pLeft[3]  = v0z+(v1z-v0z)*tmin
+            _pRight[1] = v0x+(v1x-v0x)*tmax; _pRight[2] = v0y+(v1y-v0y)*tmax; _pRight[3] = v0z+(v1z-v0z)*tmax
+        else
+            _pLeft[1]=v0x; _pLeft[2]=v0y; _pLeft[3]=v0z
+            _pRight[1]=v1x; _pRight[2]=v1y; _pRight[3]=v1z
         end
-
-        return left, right
+        return true
     end
 
-    -- getPortalPoints (ref form)
+    -- getPortalPoints (ref form) -> _pLeft, _pRight, fromType, toType  (or nil,nil,nil,nil)
     function q:_getPortalPoints(from, to)
         local fromTile, fromPoly = self._nav:getTileAndPolyByRef(from)
         if not fromTile then return nil, nil, nil, nil end
         local toTile, toPoly = self._nav:getTileAndPolyByRef(to)
         if not toTile then return nil, nil, nil, nil end
 
-        local left, right = self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile)
-        local fromType = math.floor(fromPoly.areaAndtype / 64)
-        local toType   = math.floor(toPoly.areaAndtype   / 64)
-        return left, right, fromType, toType
+        if not self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile) then
+            return nil, nil, nil, nil
+        end
+        local fromType = _floor(fromPoly.areaAndtype / 64)
+        local toType   = _floor(toPoly.areaAndtype   / 64)
+        return _pLeft, _pRight, fromType, toType
     end
 
     -- appendVertex
@@ -547,25 +608,26 @@ function M.new(navmesh, maxNodes)
             local toTile, toPoly = self._nav:getTileAndPolyByRef(to)
             if not toTile then return DT_FAILURE + DT_INVALID_PARAM end
 
-            local left, right = self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile)
-            if not left then break end
+            if not self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile) then break end
 
             -- If DT_STRAIGHTPATH_AREA_CROSSINGS (bit 0) is set, skip portals between same-area polys
+            local doPortal = true
             if (options % 2) == 1 then  -- options & DT_STRAIGHTPATH_AREA_CROSSINGS
                 local fromArea = fromPoly.areaAndtype % 64
                 local toArea   = toPoly.areaAndtype   % 64
-                if fromArea == toArea then goto continue_i end
+                doPortal = (fromArea ~= toArea)
             end
 
-            local ok, s, t = dtIntersectSegSeg2D(startPos, endPos, left, right)
+            if doPortal then
+            local ok, s, t = dtIntersectSegSeg2D(startPos, endPos, _pLeft, _pRight)
             if ok then
                 local pt = {0,0,0}
-                dtVlerp(pt, left, right, t)
+                dtVlerp(pt, _pLeft, _pRight, t)
                 local stat = self:_appendVertex(pt, 0, to,
                     straightPath, straightPathFlags, straightPathRefs, countRef, maxStraight)
                 if stat ~= DT_IN_PROGRESS then return stat end
             end
-            ::continue_i::
+            end -- doPortal
         end
         return DT_IN_PROGRESS
     end
@@ -629,11 +691,12 @@ function M.new(navmesh, maxNodes)
         local lastBestNode     = startNode
         local lastBestNodeCost = startNode.total
         local outOfNodes = false
+        local filterAreaCost   = filter.areaCost   -- cache for inlined getCost
 
         while not self._openList:empty() do
             local bestNode = self._openList:pop()
-            bestNode.flags = bestNode.flags - (bestNode.flags % 2)  -- clear OPEN bit
-            bestNode.flags = bestNode.flags + DT_NODE_CLOSED
+            -- clear OPEN bit, set CLOSED
+            bestNode.flags = band(bestNode.flags, 0xFFFFFFFE) + DT_NODE_CLOSED
 
             if bestNode.id == endRef then
                 lastBestNode = bestNode
@@ -644,13 +707,10 @@ function M.new(navmesh, maxNodes)
             local bestTile, bestPoly = self._nav:getTileAndPolyByRefUnsafe(bestRef)
 
             local parentRef = 0
-            local parentTile, parentPoly = nil, nil
             if bestNode.pidx ~= 0 then
                 parentRef = self._nodePool:getNodeAtIdx(bestNode.pidx).id
             end
-            if parentRef ~= 0 then
-                parentTile, parentPoly = self._nav:getTileAndPolyByRefUnsafe(parentRef)
-            end
+            -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
             local li = bestPoly.firstLink
             while li ~= DT_NULL_LINK do
@@ -658,72 +718,70 @@ function M.new(navmesh, maxNodes)
                 local neighbourRef = link.ref
                 li = link.next
 
+                repeat
+
                 if neighbourRef == 0 or neighbourRef == parentRef then
-                    goto continue_link
+                    break
                 end
 
                 local neighbourTile, neighbourPoly = self._nav:getTileAndPolyByRefUnsafe(neighbourRef)
                 if not filter:passFilter(neighbourRef, neighbourTile, neighbourPoly) then
-                    goto continue_link
+                    break
                 end
 
                 local crossSide = 0
                 if link.side ~= 0xff then
-                    crossSide = math.floor(link.side / 2)
+                    crossSide = _floor(link.side / 2)
                 end
 
                 local neighbourNode = self._nodePool:getNode(neighbourRef, crossSide)
                 if not neighbourNode then
                     outOfNodes = true
-                    goto continue_link
+                    break
                 end
 
                 if neighbourNode.flags == 0 then
-                    local mid = self:_getEdgeMidPointFull(bestRef, bestPoly, bestTile,
-                                                           neighbourRef, neighbourPoly, neighbourTile)
-                    if mid then dtVcopy(neighbourNode.pos, mid) end
+                    -- Pass link directly: avoids re-searching link list inside _writeMidPoint
+                    self:_writeMidPoint(bestPoly, bestTile, neighbourPoly, neighbourTile,
+                                        link, bestRef, neighbourNode.pos)
                 end
 
+                -- Inline getCost: dtVdist(pa,pb) * areaCost[curPoly.area]
+                local np = neighbourNode.pos
+                local bp = bestNode.pos
+                local dx = np[1]-bp[1]; local dy = np[2]-bp[2]; local dz = np[3]-bp[3]
+                local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * filterAreaCost[bestPoly.areaAndtype % 64]
                 local cost, heuristic
                 if neighbourRef == endRef then
-                    local curCost = filter:getCost(bestNode.pos, neighbourNode.pos,
-                        parentRef, parentTile, parentPoly,
-                        bestRef, bestTile, bestPoly,
-                        neighbourRef, neighbourTile, neighbourPoly)
-                    local endCost = filter:getCost(neighbourNode.pos, endPos,
-                        bestRef, bestTile, bestPoly,
-                        neighbourRef, neighbourTile, neighbourPoly,
-                        0, nil, nil)
+                    local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
+                    local endCost = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * filterAreaCost[neighbourPoly.areaAndtype % 64]
                     cost = bestNode.cost + curCost + endCost
                     heuristic = 0
                 else
-                    local curCost = filter:getCost(bestNode.pos, neighbourNode.pos,
-                        parentRef, parentTile, parentPoly,
-                        bestRef, bestTile, bestPoly,
-                        neighbourRef, neighbourTile, neighbourPoly)
                     cost = bestNode.cost + curCost
-                    heuristic = dtVdist(neighbourNode.pos, endPos) * H_SCALE
+                    local dx2 = np[1]-endPos[1]; local dy2 = np[2]-endPos[2]; local dz2 = np[3]-endPos[3]
+                    heuristic = _sqrt(dx2*dx2+dy2*dy2+dz2*dz2) * H_SCALE
                 end
 
                 local total = cost + heuristic
 
-                if (neighbourNode.flags % 2 == 1) and total >= neighbourNode.total then
-                    goto continue_link  -- in open, worse
+                if band(neighbourNode.flags, DT_NODE_OPEN) ~= 0 and total >= neighbourNode.total then
+                    break  -- in open, worse
                 end
-                if (math.floor(neighbourNode.flags / 2) % 2 == 1) and total >= neighbourNode.total then
-                    goto continue_link  -- in closed, worse
+                if band(neighbourNode.flags, DT_NODE_CLOSED) ~= 0 and total >= neighbourNode.total then
+                    break  -- in closed, worse
                 end
 
-                neighbourNode.pidx  = self._nodePool:getNodeIdx(bestNode)
+                neighbourNode.pidx  = bestNode._idx  -- getNodeIdx inlined: bestNode never nil here
                 neighbourNode.id    = neighbourRef
                 -- clear closed flag
-                if math.floor(neighbourNode.flags / 2) % 2 == 1 then
-                    neighbourNode.flags = neighbourNode.flags - 2
+                if band(neighbourNode.flags, DT_NODE_CLOSED) ~= 0 then
+                    neighbourNode.flags = neighbourNode.flags - DT_NODE_CLOSED
                 end
                 neighbourNode.cost  = cost
                 neighbourNode.total = total
 
-                if (neighbourNode.flags % 2) == 1 then
+                if band(neighbourNode.flags, DT_NODE_OPEN) ~= 0 then
                     self._openList:modify(neighbourNode)
                 else
                     neighbourNode.flags = neighbourNode.flags + DT_NODE_OPEN
@@ -735,7 +793,7 @@ function M.new(navmesh, maxNodes)
                     lastBestNode = neighbourNode
                 end
 
-                ::continue_link::
+                until true
             end
         end
 
@@ -816,12 +874,14 @@ function M.new(navmesh, maxNodes)
                 local link = tile.links[li+1]
                 li = link.next
 
-                if link.edge ~= segMax then goto continue_link end
+                repeat
+
+                if link.edge ~= segMax then break end
 
                 nextTile, nextPoly = self._nav:getTileAndPolyByRefUnsafe(link.ref)
-                local ntype = math.floor(nextPoly.areaAndtype / 64)
-                if ntype == DT_POLYTYPE_OFFMESH_CONNECTION then goto continue_link end
-                if not filter:passFilter(link.ref, nextTile, nextPoly) then goto continue_link end
+                local ntype = _floor(nextPoly.areaAndtype / 64)
+                if ntype == DT_POLYTYPE_OFFMESH_CONNECTION then break end
+                if not filter:passFilter(link.ref, nextTile, nextPoly) then break end
 
                 if link.side == 0xff then
                     nextRef = link.ref; break
@@ -850,7 +910,7 @@ function M.new(navmesh, maxNodes)
                     local x = startPos[1] + (endPos[1]-startPos[1])*tmax
                     if x >= lmin and x <= lmax then nextRef = link.ref; break end
                 end
-                ::continue_link::
+                until true
             end
 
             if nextRef == 0 then
@@ -860,7 +920,7 @@ function M.new(navmesh, maxNodes)
                 local va = {verts[a*3+1], verts[a*3+2], verts[a*3+3]}
                 local vb = {verts[b*3+1], verts[b*3+2], verts[b*3+3]}
                 local dx = vb[1]-va[1]; local dz = vb[3]-va[3]
-                local len = math.sqrt(dx*dx+dz*dz)
+                local len = _sqrt(dx*dx+dz*dz)
                 if len > 0 then
                     hitNormal[1] = dz/len; hitNormal[2] = 0; hitNormal[3] = -dx/len
                 end
@@ -905,7 +965,7 @@ function M.new(navmesh, maxNodes)
         local stat = self:_appendVertex(closestStart, DT_STRAIGHTPATH_START, path[1],
             straightPath, spFlags, spRefs, countRef, maxStraight)
         if stat ~= DT_IN_PROGRESS then
-            goto done
+            return straightPath, countRef[1], stat
         end
 
         if pathSize > 1 then
@@ -922,6 +982,8 @@ function M.new(navmesh, maxNodes)
 
             local i = 1
             while i <= pathSize do
+                repeat  -- repeat...until true: use break as "continue_i"
+
                 local left, right
                 local toType
 
@@ -941,7 +1003,7 @@ function M.new(navmesh, maxNodes)
                             straightPath, spFlags, spRefs, countRef, maxStraight)
                         stat = DT_SUCCESS + DT_PARTIAL_RESULT
                         if countRef[1] >= maxStraight then stat = stat + DT_BUFFER_TOO_SMALL end
-                        goto done
+                        return straightPath, countRef[1], stat
                     end
                     left = l2; right = r2; toType = toType2
 
@@ -950,14 +1012,15 @@ function M.new(navmesh, maxNodes)
                         local dsq = dtDistancePtSegSqr2D(portalApex, left, right)
                         if dsq < dtSqr(0.001) then
                             i = i + 1
-                            goto continue_i
+                            break  -- goto continue_i (then i=i+1 at bottom → i+=2 total)
                         end
                     end
                 else
-                    -- End of path
-                    left     = {closestEnd[1], closestEnd[2], closestEnd[3]}
-                    right    = {closestEnd[1], closestEnd[2], closestEnd[3]}
-                    toType   = DT_POLYTYPE_GROUND
+                    -- End of path: write into shared portal buffers (no alloc)
+                    _pLeft[1]=closestEnd[1]; _pLeft[2]=closestEnd[2]; _pLeft[3]=closestEnd[3]
+                    _pRight[1]=closestEnd[1]; _pRight[2]=closestEnd[2]; _pRight[3]=closestEnd[3]
+                    left = _pLeft; right = _pRight
+                    toType = DT_POLYTYPE_GROUND
                 end
 
                 -- Right vertex
@@ -972,7 +1035,7 @@ function M.new(navmesh, maxNodes)
                         if (options % 4) >= 1 then
                             stat = self:_appendPortals(apexIndex, leftIndex, portalLeft, path,
                                 straightPath, spFlags, spRefs, countRef, maxStraight, options)
-                            if stat ~= DT_IN_PROGRESS then goto done end
+                            if stat ~= DT_IN_PROGRESS then return straightPath, countRef[1], stat end
                         end
 
                         dtVcopy(portalApex, portalLeft)
@@ -988,7 +1051,7 @@ function M.new(navmesh, maxNodes)
 
                         stat = self:_appendVertex(portalApex, flags, ref,
                             straightPath, spFlags, spRefs, countRef, maxStraight)
-                        if stat ~= DT_IN_PROGRESS then goto done end
+                        if stat ~= DT_IN_PROGRESS then return straightPath, countRef[1], stat end
 
                         dtVcopy(portalLeft,  portalApex)
                         dtVcopy(portalRight, portalApex)
@@ -996,7 +1059,7 @@ function M.new(navmesh, maxNodes)
                         rightIndex = apexIndex
 
                         i = apexIndex
-                        goto continue_i
+                        break  -- goto continue_i
                     end
                 end
 
@@ -1012,7 +1075,7 @@ function M.new(navmesh, maxNodes)
                         if (options % 4) >= 1 then
                             stat = self:_appendPortals(apexIndex, rightIndex, portalRight, path,
                                 straightPath, spFlags, spRefs, countRef, maxStraight, options)
-                            if stat ~= DT_IN_PROGRESS then goto done end
+                            if stat ~= DT_IN_PROGRESS then return straightPath, countRef[1], stat end
                         end
 
                         dtVcopy(portalApex, portalRight)
@@ -1028,7 +1091,7 @@ function M.new(navmesh, maxNodes)
 
                         stat = self:_appendVertex(portalApex, flags, ref,
                             straightPath, spFlags, spRefs, countRef, maxStraight)
-                        if stat ~= DT_IN_PROGRESS then goto done end
+                        if stat ~= DT_IN_PROGRESS then return straightPath, countRef[1], stat end
 
                         dtVcopy(portalLeft,  portalApex)
                         dtVcopy(portalRight, portalApex)
@@ -1036,11 +1099,11 @@ function M.new(navmesh, maxNodes)
                         rightIndex = apexIndex
 
                         i = apexIndex
-                        goto continue_i
+                        break  -- goto continue_i
                     end
                 end
 
-                ::continue_i::
+                until true  -- end repeat (break acts as continue_i)
                 i = i + 1
             end
 
@@ -1048,7 +1111,7 @@ function M.new(navmesh, maxNodes)
             if (options % 4) >= 1 then
                 stat = self:_appendPortals(apexIndex, pathSize, closestEnd, path,
                     straightPath, spFlags, spRefs, countRef, maxStraight, options)
-                if stat ~= DT_IN_PROGRESS then goto done end
+                if stat ~= DT_IN_PROGRESS then return straightPath, countRef[1], stat end
             end
         end
 
@@ -1059,15 +1122,9 @@ function M.new(navmesh, maxNodes)
         stat = DT_SUCCESS
         if countRef[1] >= maxStraight then stat = stat + DT_BUFFER_TOO_SMALL end
 
-        ::done::
 
-        -- Build output table
-        local count = countRef[1]
-        local out = {}
-        for k = 1, count do
-            out[k] = {pos = straightPath[k], flags = spFlags[k], ref = spRefs[k]}
-        end
-        return out, count, stat
+        -- Return straightPath directly (positions as {x,y,z} tables, no wrapper alloc)
+        return straightPath, countRef[1], stat
     end
 
     return q

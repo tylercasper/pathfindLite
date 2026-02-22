@@ -8,6 +8,13 @@ local bin = require("binary")
 
 local M = {}
 
+-- Cache stdlib lookups (avoids global table lookup in hot paths)
+local _floor = math.floor
+local _sqrt  = math.sqrt
+local _abs   = math.abs
+local band   = require("bit").band
+local rshift = require("bit").rshift
+
 -- Constants
 local DT_VERTS_PER_POLYGON    = 6
 -- DT_NAVMESH_MAGIC = 'D'<<24 | 'N'<<16 | 'A'<<8 | 'V' = 0x444E4156
@@ -19,6 +26,39 @@ local DT_OFFMESH_CON_BIDIR    = 1
 local DT_POLYTYPE_GROUND      = 0
 local DT_POLYTYPE_OFFMESH_CONNECTION = 1
 local DT_DETAIL_EDGE_BOUNDARY = 0x01
+
+-- Pre-allocated constants to avoid per-call allocation in closestPointOnDetailEdges
+local DETAIL_JSEQ = {3, 1, 2}  -- edge index sequences (1-based)
+local DETAIL_KSEQ = {1, 2, 3}
+
+-- Pre-allocated reusable buffers (safe: Lua is single-threaded, no re-entrancy)
+local _qBvBmin     = {0,0,0}     -- queryPolygonsInTile BVH quantized bmin
+local _qBvBmax     = {0,0,0}     -- queryPolygonsInTile BVH quantized bmax
+-- Pre-allocated buffers for connectExtLinks / findConnectingPolys (safe: single-threaded)
+local _connVa      = {0,0,0}     -- edge vertex a for connectExtLinks
+local _connVb      = {0,0,0}     -- edge vertex b for connectExtLinks
+local _connVc      = {0,0,0}     -- matching poly vertex c for findConnectingPolys
+local _connVd      = {0,0,0}     -- matching poly vertex d for findConnectingPolys
+local _slabMin1    = {0,0}       -- calcSlabEndPoints out-buffer: amin
+local _slabMax1    = {0,0}       -- calcSlabEndPoints out-buffer: amax
+local _slabMin2    = {0,0}       -- calcSlabEndPoints out-buffer: bmin2
+local _slabMax2    = {0,0}       -- calcSlabEndPoints out-buffer: bmax2
+local _conBuf      = {}          -- findConnectingPolys con[] result (reused, read before next call)
+local _conareaBuf  = {}          -- findConnectingPolys conarea[] result (reused)
+local _tilesAt     = {}          -- getTilesAt result buffer (reused across calls)
+local _polyVerts   = {}           -- flat vert array for getPolyHeight (up to 18 entries)
+local _triVa       = {0, 0, 0}   -- triangle vertex a (getPolyHeight)
+local _triVb       = {0, 0, 0}   -- triangle vertex b (getPolyHeight)
+local _triVc       = {0, 0, 0}   -- triangle vertex c (getPolyHeight)
+local _detailTV1   = {0, 0, 0}   -- closestPointOnDetailEdges tv[1]
+local _detailTV2   = {0, 0, 0}   -- closestPointOnDetailEdges tv[2]
+local _detailTV3   = {0, 0, 0}   -- closestPointOnDetailEdges tv[3]
+local _detailTV    = {_detailTV1, _detailTV2, _detailTV3}
+local _detailTidx  = {0, 0, 0}   -- tidx scratch (replaces local tidx={t0,t1,t2})
+local _detailPmin  = {0, 0, 0}   -- saved best-edge pmin values
+local _detailPmax  = {0, 0, 0}   -- saved best-edge pmax values
+local _detailClos  = {0, 0, 0}   -- return buffer for closestPointOnDetailEdges
+local _closestBuf  = {0, 0, 0}   -- return buffer for closestPointOnPoly
 
 -- Poly ref bit layout (per task instructions)
 local DT_SALT_BITS = 16
@@ -81,7 +121,7 @@ local function dtClamp(v, mn, mx) return v < mn and mn or (v > mx and mx or v) e
 
 local function dtVdist(v1, v2)
     local dx = v2[1]-v1[1]; local dy = v2[2]-v1[2]; local dz = v2[3]-v1[3]
-    return math.sqrt(dx*dx + dy*dy + dz*dz)
+    return _sqrt(dx*dx + dy*dy + dz*dz)
 end
 
 local function dtVdistSqr(v1, v2)
@@ -160,7 +200,7 @@ local function dtOppositeTile(side)
 end
 
 local function dtAlign4(x)
-    return math.floor((x + 3) / 4) * 4
+    return _floor((x + 3) / 4) * 4
 end
 
 -- dtPointInPolygon: point-in-polygon test on xz plane
@@ -189,7 +229,7 @@ local function dtClosestHeightPointTriangle(p, a, b, c)
     local v2x = p[1]-a[1];                         local v2z = p[3]-a[3]
 
     local denom = v0x * v1z - v0z * v1x
-    if math.abs(denom) < EPS then return false, 0 end
+    if _abs(denom) < EPS then return false, 0 end
 
     local u = v1z * v2x - v1x * v2z
     local v = v0x * v2z - v0z * v2x
@@ -219,25 +259,43 @@ local function dtDistancePtSegSqr2D(pt, p, q)
 end
 
 -- dtDistancePtPolyEdgesSqr
+-- Inlines dtDistancePtSegSqr2D to avoid allocating {x,y,z} tables per edge.
 local function dtDistancePtPolyEdgesSqr(pt, verts, nverts, ed, et)
     local c = false
     local j = nverts
+    local ptx = pt[1]; local ptz = pt[3]
     for i = 1, nverts do
         local vi_x = verts[i*3-2]; local vi_z = verts[i*3]
         local vj_x = verts[j*3-2]; local vj_z = verts[j*3]
-        if ((vi_z > pt[3]) ~= (vj_z > pt[3])) and
-           (pt[1] < (vj_x - vi_x) * (pt[3] - vi_z) / (vj_z - vi_z) + vi_x) then
+        if ((vi_z > ptz) ~= (vj_z > ptz)) and
+           (ptx < (vj_x - vi_x) * (ptz - vi_z) / (vj_z - vi_z) + vi_x) then
             c = not c
         end
-        -- store dist to edge j
-        local vj = {verts[j*3-2], verts[j*3-1], verts[j*3]}
-        local vi = {verts[i*3-2], verts[i*3-1], verts[i*3]}
-        local d, t = dtDistancePtSegSqr2D(pt, vj, vi)
-        ed[j] = d
+        -- inline dtDistancePtSegSqr2D(pt, {vj_x,_,vj_z}, {vi_x,_,vi_z})
+        local pqx = vi_x - vj_x; local pqz = vi_z - vj_z
+        local dx  = ptx  - vj_x; local dz  = ptz  - vj_z
+        local d2  = pqx*pqx + pqz*pqz
+        local t   = pqx*dx + pqz*dz
+        if d2 > 0 then t = t/d2 end
+        if t < 0 then t = 0 elseif t > 1 then t = 1 end
+        dx = vj_x + t*pqx - ptx
+        dz = vj_z + t*pqz - ptz
+        ed[j] = dx*dx + dz*dz
         et[j] = t
         j = i
     end
     return c
+end
+
+-- BVH quantization helpers (module-level to avoid per-call closure allocation)
+local function quantMinF(qfac, v)
+    local u = math.min(_floor(qfac * v), 65535)
+    return u - (u % 2)
+end
+local function quantMaxF(qfac, v)
+    local u = math.min(_floor(qfac * v + 1), 65535)
+    if u % 2 == 0 then u = u + 1 end
+    return u
 end
 
 -- ---------------------------------------------------------------------------
@@ -266,8 +324,8 @@ local function getSlabCoord(va, side)
     return 0
 end
 
-local function calcSlabEndPoints(va, vb, side)
-    local bmin = {0,0}; local bmax = {0,0}
+-- calcSlabEndPoints: writes into caller-supplied bmin/bmax (no allocation).
+local function calcSlabEndPoints(va, vb, side, bmin, bmax)
     if side == 0 or side == 4 then
         if va[3] < vb[3] then
             bmin[1] = va[3]; bmin[2] = va[2]; bmax[1] = vb[3]; bmax[2] = vb[2]
@@ -281,7 +339,6 @@ local function calcSlabEndPoints(va, vb, side)
             bmin[1] = vb[1]; bmin[2] = vb[2]; bmax[1] = va[1]; bmax[2] = va[2]
         end
     end
-    return bmin, bmax
 end
 
 local function overlapSlabs(amin, amax, bmin, bmax, px, py)
@@ -308,95 +365,77 @@ end
 -- closestPointOnDetailEdges (template<bool onlyBoundary>)
 -- ---------------------------------------------------------------------------
 
+-- fillDV: fill a pre-allocated {x,y,z} from detail vert index (0-based).
+-- Takes pre-extracted locals to avoid repeated table field lookups.
+local function fillDV(out, idx, tileV, detailV, polyV, polyVC, pvBase)
+    if idx < polyVC then
+        local vi = polyV[idx+1]
+        out[1]=tileV[vi*3+1]; out[2]=tileV[vi*3+2]; out[3]=tileV[vi*3+3]
+    else
+        local dvi = pvBase + (idx - polyVC)
+        out[1]=detailV[dvi*3+1]; out[2]=detailV[dvi*3+2]; out[3]=detailV[dvi*3+3]
+    end
+end
+
 local function closestPointOnDetailEdges(tile, poly, pos, onlyBoundary)
-    local ip = poly._index  -- 0-based index of poly in tile.polys
-    local pd = tile.detailMeshes[ip + 1]  -- 1-based
-    if not pd then return {pos[1], pos[2], pos[3]} end
+    local ip = poly._index
+    local pd = tile.detailMeshes[ip + 1]
+    if not pd then
+        _detailClos[1]=pos[1]; _detailClos[2]=pos[2]; _detailClos[3]=pos[3]
+        return _detailClos
+    end
 
     local dmin = math.huge
     local tmin_out = 0
-    local pmin_out = nil
-    local pmax_out = nil
+    local pmin_found = false
 
-    local function getDetailVert(idx)
-        if idx < poly.vertCount then
-            local vi = poly.verts[idx + 1]
-            return {tile.verts[vi*3+1], tile.verts[vi*3+2], tile.verts[vi*3+3]}
-        else
-            local dvi = pd.vertBase + (idx - poly.vertCount)
-            return {tile.detailVerts[dvi*3+1], tile.detailVerts[dvi*3+2], tile.detailVerts[dvi*3+3]}
-        end
-    end
+    local tileV    = tile.verts
+    local detailV  = tile.detailVerts
+    local detailT  = tile.detailTris
+    local polyV    = poly.verts
+    local polyVC   = poly.vertCount
+    local pvBase   = pd.vertBase
 
     for ti = 0, pd.triCount - 1 do
-        local triIdx = (pd.triBase + ti) * 4 + 1  -- 1-based index into detailTris
-        local t0 = tile.detailTris[triIdx]
-        local t1 = tile.detailTris[triIdx+1]
-        local t2 = tile.detailTris[triIdx+2]
-        local t3 = tile.detailTris[triIdx+3]
+        local triIdx = (pd.triBase + ti) * 4 + 1
+        local t0 = detailT[triIdx]
+        local t1 = detailT[triIdx+1]
+        local t2 = detailT[triIdx+2]
+        local t3 = detailT[triIdx+3]
 
-        if onlyBoundary then
-            -- ANY_BOUNDARY_EDGE: bits 0, 2, 4 of t3
-            local bit0 = t3 % 2
-            local bit2 = math.floor(t3 / 4) % 2
-            local bit4 = math.floor(t3 / 16) % 2
-            if bit0 == 0 and bit2 == 0 and bit4 == 0 then
-                -- no boundary edges in this triangle, skip
-                goto continue_tri
-            end
-        end
+        if not (onlyBoundary and band(t3, 0x15) == 0) then
 
-        local tidx = {t0, t1, t2}
-        local tv = {}
-        for k = 1, 3 do
-            tv[k] = getDetailVert(tidx[k])
-        end
+        fillDV(_detailTV1, t0, tileV, detailV, polyV, polyVC, pvBase)
+        fillDV(_detailTV2, t1, tileV, detailV, polyV, polyVC, pvBase)
+        fillDV(_detailTV3, t2, tileV, detailV, polyV, polyVC, pvBase)
 
-        -- Iterate over 3 edges: (j=3,k=1), (j=1,k=2), (j=2,k=3) in 1-based
-        -- C++ iterates k=0..2 with j starting at 2 (0-based).
-        -- Edge j->k where j goes: 2,0,1 and k goes: 0,1,2 (0-based)
-        -- In 1-based: j goes: 3,1,2 and k goes: 1,2,3
-        local jseq = {3, 1, 2}
-        local kseq = {1, 2, 3}
+        -- 3 edges: (TV3→TV1, bits 4-5), (TV1→TV2, bits 0-1), (TV2→TV3, bits 2-3)
+        _detailTidx[1] = t0; _detailTidx[2] = t1; _detailTidx[3] = t2
         for ei = 1, 3 do
-            local j1 = jseq[ei]  -- 1-based
-            local k1 = kseq[ei]  -- 1-based
-            local j0 = j1 - 1    -- 0-based (for C++ edge index)
-            -- edgeFlag = (t3 >> (j0*2)) & 0x3
-            local edgeFlag = math.floor(t3 / (4^j0)) % 4
-            local isBoundary = (edgeFlag % 2) == 1
-
-            local skip = false
-            if not isBoundary then
-                if onlyBoundary then
-                    skip = true
-                else
-                    -- Inner edge: only visit once, skip if tris[j] >= tris[k]
-                    -- (0-based comparison)
-                    if tidx[j1] >= tidx[k1] then
-                        skip = true
-                    end
-                end
-            end
-
-            if not skip then
-                local d, t = dtDistancePtSegSqr2D(pos, tv[j1], tv[k1])
+            local j1 = DETAIL_JSEQ[ei]
+            local k1 = DETAIL_KSEQ[ei]
+            local isBdry = band(rshift(t3, (j1-1)*2), 1) == 1
+            if isBdry or (not onlyBoundary and _detailTidx[j1] < _detailTidx[k1]) then
+                local d, t = dtDistancePtSegSqr2D(pos, _detailTV[j1], _detailTV[k1])
                 if d < dmin then
                     dmin = d; tmin_out = t
-                    pmin_out = tv[j1]; pmax_out = tv[k1]
+                    local pj = _detailTV[j1]; local pk = _detailTV[k1]
+                    _detailPmin[1]=pj[1]; _detailPmin[2]=pj[2]; _detailPmin[3]=pj[3]
+                    _detailPmax[1]=pk[1]; _detailPmax[2]=pk[2]; _detailPmax[3]=pk[3]
+                    pmin_found = true
                 end
             end
         end
-        ::continue_tri::
+        end -- not (onlyBoundary and band(t3,0x15)==0)
     end
 
-    if pmin_out == nil then
-        return {pos[1], pos[2], pos[3]}
+    if not pmin_found then
+        _detailClos[1]=pos[1]; _detailClos[2]=pos[2]; _detailClos[3]=pos[3]
+        return _detailClos
     end
 
-    local closest = {0,0,0}
-    dtVlerp(closest, pmin_out, pmax_out, tmin_out)
-    return closest
+    dtVlerp(_detailClos, _detailPmin, _detailPmax, tmin_out)
+    return _detailClos
 end
 
 -- ---------------------------------------------------------------------------
@@ -680,7 +719,7 @@ function M.new(paramsData)
     nm._maxTiles    = p.maxTiles
 
     -- Tile lookup table (LUT), size = next power of 2 of maxTiles/4
-    local lutSize = nextPow2(math.max(1, math.floor(p.maxTiles / 4)))
+    local lutSize = nextPow2(math.max(1, _floor(p.maxTiles / 4)))
     nm._tileLutSize = lutSize
     nm._tileLutMask = lutSize - 1
     nm._posLookup   = {}   -- hash -> tile (linked via .next)
@@ -726,20 +765,21 @@ function M.new(paramsData)
         return nil
     end
 
-    -- getTilesAt(x, y) -> array
+    -- getTilesAt(x, y) -> buf, count  (buf is a shared module-level buffer; safe: single-threaded)
     function self:getTilesAt(x, y)
-        local result = {}
+        local n = 0
         local h = computeTileHash(x, y, self._tileLutMask)
         local tile = self._posLookup[h]
         while tile do
-            if tile.header and
-               tile.header.x == x and
-               tile.header.y == y then
-                result[#result+1] = tile
+            if tile.header and tile.header.x == x and tile.header.y == y then
+                n = n + 1; _tilesAt[n] = tile
             end
             tile = tile.next
         end
-        return result
+        -- Clear stale entries so numeric iteration is safe
+        local old = #_tilesAt
+        while old > n do _tilesAt[old] = nil; old = old - 1 end
+        return _tilesAt, n
     end
 
     -- getNeighbourTilesAt(x, y, side)
@@ -759,8 +799,8 @@ function M.new(paramsData)
 
     -- calcTileLoc(pos) -> tx, ty
     function self:calcTileLoc(pos)
-        local tx = math.floor((pos[1] - self._orig[1]) / self._tileWidth)
-        local ty = math.floor((pos[3] - self._orig[3]) / self._tileHeight)
+        local tx = _floor((pos[1] - self._orig[1]) / self._tileWidth)
+        local ty = _floor((pos[3] - self._orig[3]) / self._tileHeight)
         return tx, ty
     end
 
@@ -826,20 +866,10 @@ function M.new(paramsData)
             local maxy = dtClamp(qmax[2], tbmin[2], tbmax[2]) - tbmin[2]
             local maxz = dtClamp(qmax[3], tbmin[3], tbmax[3]) - tbmin[3]
 
-            -- Quantize: bmin &= 0xfffe (clear bit 0), bmax |= 1 (set bit 0)
-            -- C++: bmin[i] = (unsigned short)(qfac * min) & 0xfffe
-            --      bmax[i] = (unsigned short)(qfac * max + 1) | 1
-            local function quantMin(v)
-                local u = math.min(math.floor(qfac * v), 65535)
-                return u - (u % 2)  -- & 0xfffe
-            end
-            local function quantMax(v)
-                local u = math.min(math.floor(qfac * v + 1), 65535)
-                if u % 2 == 0 then u = u + 1 end  -- | 1
-                return u
-            end
-            local bmin = { quantMin(minx), quantMin(miny), quantMin(minz) }
-            local bmax = { quantMax(maxx), quantMax(maxy), quantMax(maxz) }
+            -- Quantize into pre-allocated buffers (avoids 2 closure + 2 table allocs per call)
+            local bmin = _qBvBmin; local bmax = _qBvBmax
+            bmin[1]=quantMinF(qfac,minx); bmin[2]=quantMinF(qfac,miny); bmin[3]=quantMinF(qfac,minz)
+            bmax[1]=quantMaxF(qfac,maxx); bmax[2]=quantMaxF(qfac,maxy); bmax[3]=quantMaxF(qfac,maxz)
 
             local nodeIdx = 1
             local nodeEnd = tile.header.bvNodeCount + 1
@@ -866,7 +896,7 @@ function M.new(paramsData)
             for k = 0, tile.header.polyCount - 1 do
                 local p = tile.polys[k+1]
                 if p.areaAndtype ~= nil then
-                    local ptype = math.floor(p.areaAndtype / 64)
+                    local ptype = _floor(p.areaAndtype / 64)
                     if ptype ~= DT_POLYTYPE_OFFMESH_CONNECTION then
                         -- compute bounds
                         local vi0 = p.verts[1]
@@ -893,7 +923,7 @@ function M.new(paramsData)
 
     -- getPolyHeight(tile, poly, pos) -> bool, height
     function self:getPolyHeight(tile, poly, pos)
-        local ptype = math.floor(poly.areaAndtype / 64)
+        local ptype = _floor(poly.areaAndtype / 64)
         if ptype == DT_POLYTYPE_OFFMESH_CONNECTION then
             return false, 0
         end
@@ -902,43 +932,34 @@ function M.new(paramsData)
         local pd = tile.detailMeshes[ip+1]
         if not pd then return false, 0 end
 
-        -- Build flat verts array for dtPointInPolygon
-        local verts = {}
+        -- Build flat verts array for dtPointInPolygon (reuse module-level buffer)
         local nv = poly.vertCount
+        local tileVerts = tile.verts
+        local polyV = poly.verts
         for vi = 1, nv do
-            local vidx = poly.verts[vi]
-            verts[vi*3-2] = tile.verts[vidx*3+1]
-            verts[vi*3-1] = tile.verts[vidx*3+2]
-            verts[vi*3  ] = tile.verts[vidx*3+3]
+            local vidx = polyV[vi]
+            _polyVerts[vi*3-2] = tileVerts[vidx*3+1]
+            _polyVerts[vi*3-1] = tileVerts[vidx*3+2]
+            _polyVerts[vi*3  ] = tileVerts[vidx*3+3]
         end
 
-        if not dtPointInPolygon(pos, verts, nv) then
+        if not dtPointInPolygon(pos, _polyVerts, nv) then
             return false, 0
         end
 
-        -- Helper: get a vertex from detail tri index (0-based idx)
-        local function getTriVert(idx)
-            if idx < poly.vertCount then
-                local vi = poly.verts[idx+1]
-                return {tile.verts[vi*3+1], tile.verts[vi*3+2], tile.verts[vi*3+3]}
-            else
-                local dvi = pd.vertBase + (idx - poly.vertCount)
-                return {tile.detailVerts[dvi*3+1], tile.detailVerts[dvi*3+2], tile.detailVerts[dvi*3+3]}
-            end
-        end
+        -- Fill tri vertices via module-level fillDV (no closure, no allocation)
+        local detailTris = tile.detailTris
+        local detailVerts = tile.detailVerts
+        local pdVertBase = pd.vertBase
 
         -- Find height from detail triangles
         for ti = 0, pd.triCount - 1 do
             local tidx = (pd.triBase + ti) * 4 + 1
-            local t0 = tile.detailTris[tidx]
-            local t1 = tile.detailTris[tidx+1]
-            local t2 = tile.detailTris[tidx+2]
+            fillDV(_triVa, detailTris[tidx],   tileVerts, detailVerts, polyV, nv, pdVertBase)
+            fillDV(_triVb, detailTris[tidx+1], tileVerts, detailVerts, polyV, nv, pdVertBase)
+            fillDV(_triVc, detailTris[tidx+2], tileVerts, detailVerts, polyV, nv, pdVertBase)
 
-            local va = getTriVert(t0)
-            local vb = getTriVert(t1)
-            local vc = getTriVert(t2)
-
-            local ok, h = dtClosestHeightPointTriangle(pos, va, vb, vc)
+            local ok, h = dtClosestHeightPointTriangle(pos, _triVa, _triVb, _triVc)
             if ok then
                 return true, h
             end
@@ -950,17 +971,19 @@ function M.new(paramsData)
     end
 
     -- closestPointOnPoly(ref, pos) -> closest, posOverPoly
+    -- NOTE: returns a shared buffer (_closestBuf); caller must copy before next call
     function self:closestPointOnPoly(ref, pos)
         local tile, poly = self:getTileAndPolyByRefUnsafe(ref)
 
-        local closest = {pos[1], pos[2], pos[3]}
+        local closest = _closestBuf
+        closest[1] = pos[1]; closest[2] = pos[2]; closest[3] = pos[3]
         local ok, h = self:getPolyHeight(tile, poly, pos)
         if ok then
             closest[2] = h
             return closest, true
         end
 
-        local ptype = math.floor(poly.areaAndtype / 64)
+        local ptype = _floor(poly.areaAndtype / 64)
         if ptype == DT_POLYTYPE_OFFMESH_CONNECTION then
             local v0i = poly.verts[1]; local v1i = poly.verts[2]
             local v0 = {tile.verts[v0i*3+1], tile.verts[v0i*3+2], tile.verts[v0i*3+3]}
@@ -1007,14 +1030,16 @@ function M.new(paramsData)
     end
 
     -- findConnectingPolys(va, vb, tile, side) -> con[], conarea[], n
+    -- Returns module-level _conBuf/_conareaBuf; caller must consume before next call.
     function self:findConnectingPolys(va, vb, tile, side)
-        if not tile then return {}, {}, 0 end
-        local amin, amax = calcSlabEndPoints(va, vb, side)
+        if not tile then return _conBuf, _conareaBuf, 0 end
+        calcSlabEndPoints(va, vb, side, _slabMin1, _slabMax1)
         local apos = getSlabCoord(va, side)
         -- m = DT_EXT_LINK | side  (matches the neis[] value for this side)
         local m = DT_EXT_LINK + side  -- DT_EXT_LINK=0x8000, side in [0..7]
-        local con = {}; local conarea = {}; local n = 0
+        local n = 0
         local base = self:getPolyRefBase(tile)
+        local tverts = tile.verts
 
         for k = 0, tile.header.polyCount - 1 do
             local poly = tile.polys[k+1]
@@ -1024,23 +1049,24 @@ function M.new(paramsData)
                 if not found and poly.neis[j] == m then
                     local vci = poly.verts[j]
                     local vdi = poly.verts[(j % nv) + 1]
-                    local vc = {tile.verts[vci*3+1], tile.verts[vci*3+2], tile.verts[vci*3+3]}
-                    local vd = {tile.verts[vdi*3+1], tile.verts[vdi*3+2], tile.verts[vdi*3+3]}
+                    local vc = _connVc; local vd = _connVd
+                    vc[1]=tverts[vci*3+1]; vc[2]=tverts[vci*3+2]; vc[3]=tverts[vci*3+3]
+                    vd[1]=tverts[vdi*3+1]; vd[2]=tverts[vdi*3+2]; vd[3]=tverts[vdi*3+3]
                     local bpos = getSlabCoord(vc, side)
                     if dtAbs(apos - bpos) <= 0.01 then
-                        local bmin2, bmax2 = calcSlabEndPoints(vc, vd, side)
-                        if overlapSlabs(amin, amax, bmin2, bmax2, 0.01, tile.header.walkableClimb) then
+                        calcSlabEndPoints(vc, vd, side, _slabMin2, _slabMax2)
+                        if overlapSlabs(_slabMin1, _slabMax1, _slabMin2, _slabMax2, 0.01, tile.header.walkableClimb) then
                             n = n + 1
-                            conarea[n*2-1] = dtMax(amin[1], bmin2[1])
-                            conarea[n*2  ] = dtMin(amax[1], bmax2[1])
-                            con[n] = base + k
+                            _conareaBuf[n*2-1] = dtMax(_slabMin1[1], _slabMin2[1])
+                            _conareaBuf[n*2  ] = dtMin(_slabMax1[1], _slabMax2[1])
+                            _conBuf[n] = base + k
                             found = true  -- break equivalent
                         end
                     end
                 end
             end
         end
-        return con, conarea, n
+        return _conBuf, _conareaBuf, n
     end
 
     -- connectIntLinks(tile)
@@ -1050,7 +1076,7 @@ function M.new(paramsData)
             local poly = tile.polys[k+1]
             poly.firstLink = DT_NULL_LINK
 
-            local ptype = math.floor(poly.areaAndtype / 64)
+            local ptype = _floor(poly.areaAndtype / 64)
             if ptype == DT_POLYTYPE_OFFMESH_CONNECTION then
                 -- skip off-mesh polys
             else
@@ -1085,9 +1111,9 @@ function M.new(paramsData)
             local halfExtents = {con.rad, tile.header.walkableClimb, con.rad}
             local p = {con.pos[1], con.pos[2], con.pos[3]}  -- first vertex
             local ref, nearestPt = self:findNearestPolyInTile(tile, p, halfExtents)
-            if ref == 0 then goto continue_con end
+            if ref ~= 0 then
             local dx = nearestPt[1]-p[1]; local dz = nearestPt[3]-p[3]
-            if dx*dx + dz*dz > con.rad * con.rad then goto continue_con end
+            if dx*dx + dz*dz <= con.rad * con.rad then
 
             -- Update vertex 0 of the poly to nearestPt
             local vi = poly.verts[1]
@@ -1117,7 +1143,7 @@ function M.new(paramsData)
                 lk2.next = landPoly.firstLink
                 landPoly.firstLink = tidx
             end
-            ::continue_con::
+            end end -- dx*dx+dz*dz / ref~=0
         end
     end
 
@@ -1136,8 +1162,10 @@ function M.new(paramsData)
                         local vai = poly.verts[j]
                         local vbi_idx = (j % nv) + 1
                         local vbi = poly.verts[vbi_idx]
-                        local va = {tile.verts[vai*3+1], tile.verts[vai*3+2], tile.verts[vai*3+3]}
-                        local vb = {tile.verts[vbi*3+1], tile.verts[vbi*3+2], tile.verts[vbi*3+3]}
+                        local tverts = tile.verts
+                        local va = _connVa; local vb = _connVb
+                        va[1]=tverts[vai*3+1]; va[2]=tverts[vai*3+2]; va[3]=tverts[vai*3+3]
+                        vb[1]=tverts[vbi*3+1]; vb[2]=tverts[vbi*3+2]; vb[3]=tverts[vbi*3+3]
                         local con, neia, nnei = self:findConnectingPolys(va, vb, target, dtOppositeTile(dir))
 
                         for kk = 1, nnei do
@@ -1153,14 +1181,14 @@ function M.new(paramsData)
                                     local tmin = (neia[kk*2-1] - va[3]) / (vb[3] - va[3])
                                     local tmax = (neia[kk*2  ] - va[3]) / (vb[3] - va[3])
                                     if tmin > tmax then local tmp=tmin; tmin=tmax; tmax=tmp end
-                                    lk.bmin = math.floor(dtClamp(tmin, 0, 1) * 255 + 0.5)
-                                    lk.bmax = math.floor(dtClamp(tmax, 0, 1) * 255 + 0.5)
+                                    lk.bmin = _floor(dtClamp(tmin, 0, 1) * 255 + 0.5)
+                                    lk.bmax = _floor(dtClamp(tmax, 0, 1) * 255 + 0.5)
                                 elseif dir == 2 or dir == 6 then
                                     local tmin = (neia[kk*2-1] - va[1]) / (vb[1] - va[1])
                                     local tmax = (neia[kk*2  ] - va[1]) / (vb[1] - va[1])
                                     if tmin > tmax then local tmp=tmin; tmin=tmax; tmax=tmp end
-                                    lk.bmin = math.floor(dtClamp(tmin, 0, 1) * 255 + 0.5)
-                                    lk.bmax = math.floor(dtClamp(tmax, 0, 1) * 255 + 0.5)
+                                    lk.bmin = _floor(dtClamp(tmin, 0, 1) * 255 + 0.5)
+                                    lk.bmax = _floor(dtClamp(tmax, 0, 1) * 255 + 0.5)
                                 end
 
                                 lk.next = poly.firstLink
@@ -1180,16 +1208,16 @@ function M.new(paramsData)
 
         for k = 1, target.header.offMeshConCount do
             local targetCon = target.offMeshCons[k]
-            if targetCon.side ~= oppositeSide then goto continue_con end
+            if targetCon.side == oppositeSide then
             local targetPoly = target.polys[targetCon.poly + 1]
-            if targetPoly.firstLink == DT_NULL_LINK then goto continue_con end
+            if targetPoly.firstLink ~= DT_NULL_LINK then
 
             local halfExtents = {targetCon.rad, target.header.walkableClimb, targetCon.rad}
             local p = {targetCon.pos[4], targetCon.pos[5], targetCon.pos[6]}
             local ref, nearestPt = self:findNearestPolyInTile(tile, p, halfExtents)
-            if ref == 0 then goto continue_con end
+            if ref ~= 0 then
             local dx = nearestPt[1]-p[1]; local dz = nearestPt[3]-p[3]
-            if dx*dx + dz*dz > targetCon.rad * targetCon.rad then goto continue_con end
+            if dx*dx + dz*dz <= targetCon.rad * targetCon.rad then
 
             -- Update vertex 1 of targetPoly
             local vi1 = targetPoly.verts[2]
@@ -1223,7 +1251,7 @@ function M.new(paramsData)
                     landPoly.firstLink = tidx
                 end
             end
-            ::continue_con::
+            end end end end -- dx*dx+dz*dz / ref~=0 / firstLink / side
         end
     end
 
@@ -1357,7 +1385,7 @@ function M.dtIntersectSegSeg2D(ap, aq, bp, bq)
     local v = {bq[1]-bp[1], bq[2]-bp[2], bq[3]-bp[3]}
     local w = {ap[1]-bp[1], ap[2]-bp[2], ap[3]-bp[3]}
     local d = vperpXZ(u, v)
-    if math.abs(d) < 1e-6 then return false, 0, 0 end
+    if _abs(d) < 1e-6 then return false, 0, 0 end
     local s = vperpXZ(v, w) / d
     local t = vperpXZ(u, w) / d
     return true, s, t
@@ -1393,7 +1421,7 @@ function M.dtIntersectSegmentPoly2D(p0, p1, verts, nverts)
         -- d = dtVperp2D(dir, edge) = dir.z*edge.x - dir.x*edge.z
         local d = dirz * edgex - dirx * edgez
 
-        if math.abs(d) < EPS then
+        if _abs(d) < EPS then
             if n < 0 then return false, 0, 0, -1, -1 end
             -- else: parallel and inside, continue
         else

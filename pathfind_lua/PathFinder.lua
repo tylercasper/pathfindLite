@@ -8,6 +8,12 @@ local TerrainMap     = require("TerrainMap")
 
 local TERRAIN_INVALID_HEIGHT = TerrainMap.TERRAIN_INVALID_HEIGHT
 
+-- Set PathFinderDebug = false before requiring this module to suppress log output.
+local function dbg(fmt, ...)
+    if PathFinderDebug == false then return end
+    io.stderr:write(string.format("[pathfind] " .. fmt .. "\n", ...))
+end
+
 local M = {}
 
 local BLOCK_SIZE  = 533.33333
@@ -30,7 +36,7 @@ local function worldToTile(x, y)
     local ftx = TILE_ORIGIN - x / BLOCK_SIZE
     local fty = TILE_ORIGIN - y / BLOCK_SIZE
     if ftx < 0 or ftx >= 64 or fty < 0 or fty >= 64 then
-        io.stderr:write(string.format("[pathfind] ERROR: coords (%.2f, %.2f) out of world bounds\n", x, y))
+        dbg("ERROR: coords (%.2f, %.2f) out of world bounds", x, y)
         return nil
     end
     return math.floor(ftx), math.floor(fty)
@@ -53,15 +59,20 @@ function M.new(dataDir, mapId)
         _loadedNavTiles  = {},   -- set: tileID -> true
         _terrainTiles    = {},   -- map: tileID -> TerrainMap
         _initialized     = false,
+        -- Pre-allocated per-query buffers (avoids alloc on every computeDistance call)
+        _startPos        = {0,0,0},
+        _endPos          = {0,0,0},
+        _endPosAdj       = {0,0,0},
+        _extents         = {2.0, 4.0, 2.0},
     }
 
     -- Load .mmap params file
     local mmapPath = string.format("%s/mmaps/%03d.mmap", dataDir, mapId)
-    io.stderr:write(string.format("[pathfind] loading navmesh params: %s\n", mmapPath))
+    dbg("loading navmesh params: %s", mmapPath)
 
     local fp = io.open(mmapPath, "rb")
     if not fp then
-        io.stderr:write(string.format("[pathfind] ERROR: could not open %s\n", mmapPath))
+        dbg("ERROR: could not open %s", mmapPath)
         return pf
     end
     -- dtNavMeshParams: orig[3] + tileWidth + tileHeight + maxTiles + maxPolys = 7*4 = 28 bytes
@@ -69,7 +80,7 @@ function M.new(dataDir, mapId)
     fp:close()
 
     if not paramsData or #paramsData < 28 then
-        io.stderr:write("[pathfind] ERROR: short read of mmap params\n")
+        dbg("ERROR: short read of mmap params")
         return pf
     end
 
@@ -81,7 +92,7 @@ function M.new(dataDir, mapId)
     pf._navQuery = NavMeshQuery.new(navmesh, 65535)
     pf._filter   = NavMeshQuery.newFilter()
 
-    io.stderr:write("[pathfind] navmesh ready\n")
+    dbg("navmesh ready")
     pf._initialized = true
 
     -- loadNavTile(tx, ty)
@@ -91,28 +102,28 @@ function M.new(dataDir, mapId)
 
         local path = string.format("%s/mmaps/%03d%02d%02d.mmtile",
             self._dataDir, self._mapId, tx, ty)
-        io.stderr:write(string.format("[pathfind] loading nav tile (%d,%d): %s\n", tx, ty, path))
+        dbg("loading nav tile (%d,%d): %s", tx, ty, path)
 
         local f = io.open(path, "rb")
         if not f then
-            io.stderr:write("[pathfind] WARNING: nav tile not found\n")
+            dbg("WARNING: nav tile not found")
             return false
         end
         local data = f:read("*a")
         f:close()
 
         if not data or #data < 20 then
-            io.stderr:write("[pathfind] ERROR: short read of mmtile\n")
+            dbg("ERROR: short read of mmtile")
             return false
         end
 
         local ok, err = self._navMesh:addTile(data)
         if not ok then
-            io.stderr:write(string.format("[pathfind] ERROR: addTile failed: %s\n", tostring(err)))
+            dbg("ERROR: addTile failed: %s", tostring(err))
             return false
         end
 
-        io.stderr:write(string.format("[pathfind] nav tile (%d,%d) loaded OK (%d bytes)\n", tx, ty, #data))
+        dbg("nav tile (%d,%d) loaded OK (%d bytes)", tx, ty, #data)
         self._loadedNavTiles[id] = true
         return true
     end
@@ -128,7 +139,7 @@ function M.new(dataDir, mapId)
         local tyMin = math.min(ty1, ty2)
         local tyMax = math.max(ty1, ty2)
 
-        io.stderr:write(string.format("[pathfind] tile range x:[%d,%d] y:[%d,%d]\n", txMin, txMax, tyMin, tyMax))
+        dbg("tile range x:[%d,%d] y:[%d,%d]", txMin, txMax, tyMin, tyMax)
 
         for tx = txMin, txMax do
             for ty = tyMin, tyMax do
@@ -146,7 +157,7 @@ function M.new(dataDir, mapId)
         if not self._terrainTiles[id] then
             local path = string.format("%s/maps/%03d%02d%02d.map",
                 self._dataDir, self._mapId, tx, ty)
-            io.stderr:write(string.format("[pathfind] loading terrain tile (%d,%d): %s\n", tx, ty, path))
+            dbg("loading terrain tile (%d,%d): %s", tx, ty, path)
 
             local f = io.open(path, "rb")
             local data = nil
@@ -159,28 +170,26 @@ function M.new(dataDir, mapId)
             self._terrainTiles[id] = tm
 
             local ok = tm:isLoaded()
-            io.stderr:write(string.format("[pathfind] terrain tile (%d,%d) %s\n",
-                tx, ty, ok and "loaded OK" or "FAILED (no .map file?)"))
+            dbg("terrain tile (%d,%d) %s", tx, ty, ok and "loaded OK" or "FAILED (no .map file?)")
         end
 
         local h = self._terrainTiles[id]:getHeight(x, y)
-        io.stderr:write(string.format("[pathfind] terrain height at (%.2f, %.2f) = %.4f\n", x, y, h))
+        dbg("terrain height at (%.2f, %.2f) = %.4f", x, y, h)
         return h
     end
 
     -- computeDistance(x1, y1, x2, y2) -> distance or -1
     function pf:computeDistance(x1, y1, x2, y2)
-        io.stderr:write(string.format("[pathfind] computeDistance (%.4f, %.4f) -> (%.4f, %.4f)\n",
-            x1, y1, x2, y2))
+        dbg("computeDistance (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
 
         if math.abs(x1) > WORLD_MAX or math.abs(y1) > WORLD_MAX or
            math.abs(x2) > WORLD_MAX or math.abs(y2) > WORLD_MAX then
-            io.stderr:write("[pathfind] ERROR: coordinates exceed world bounds\n")
+            dbg("ERROR: coordinates exceed world bounds")
             return -1.0
         end
 
         if not self._initialized then
-            io.stderr:write("[pathfind] ERROR: not initialized\n")
+            dbg("ERROR: not initialized")
             return -1.0
         end
 
@@ -190,40 +199,43 @@ function M.new(dataDir, mapId)
         local z2 = self:getTerrainHeight(x2, y2)
 
         if z1 == TERRAIN_INVALID_HEIGHT or z2 == TERRAIN_INVALID_HEIGHT then
-            io.stderr:write(string.format("[pathfind] ERROR: terrain height lookup failed (z1=%.2f z2=%.2f)\n", z1, z2))
+            dbg("ERROR: terrain height lookup failed (z1=%.2f z2=%.2f)", z1, z2)
             return -1.0
         end
 
-        local startPos = toRecast(x1, y1, z1)
-        local endPos   = toRecast(x2, y2, z2)
-        io.stderr:write(string.format("[pathfind] recast start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f)\n",
+        -- Fill pre-allocated recast buffers (avoids 2 table allocs per call)
+        local startPos = self._startPos
+        startPos[1]=y1; startPos[2]=z1; startPos[3]=x1
+        local endPos = self._endPos
+        endPos[1]=y2; endPos[2]=z2; endPos[3]=x2
+        dbg("recast start=(%.2f,%.2f,%.2f) end=(%.2f,%.2f,%.2f)",
             startPos[1], startPos[2], startPos[3],
-            endPos[1],   endPos[2],   endPos[3]))
+            endPos[1],   endPos[2],   endPos[3])
 
-        local extents = {2.0, 4.0, 2.0}
+        local extents = self._extents   -- pre-allocated {2.0, 4.0, 2.0}
         local filter  = self._filter
 
         local startRef, startNearPt = self._navQuery:findNearestPoly(startPos, extents, filter)
         local endRef,   endNearPt   = self._navQuery:findNearestPoly(endPos,   extents, filter)
 
-        io.stderr:write(string.format("[pathfind] startRef=%.0f endRef=%.0f\n",
-            startRef or 0, endRef or 0))
+        dbg("startRef=%.0f endRef=%.0f", startRef or 0, endRef or 0)
 
         if not startRef or startRef == 0 or not endRef or endRef == 0 then
-            io.stderr:write("[pathfind] ERROR: could not find nearest poly\n")
+            dbg("ERROR: could not find nearest poly")
             return -1.0
         end
 
         local path, npolys, status = self._navQuery:findPath(
             startRef, endRef, startPos, endPos, filter, MAX_POLYS)
-        io.stderr:write(string.format("[pathfind] findPath: %d polys\n", npolys))
+        dbg("findPath: %d polys", npolys)
 
         if npolys == 0 then return -1.0 end
 
-        -- Clamp end to last reachable poly if incomplete
-        local endPosAdj = {endPos[1], endPos[2], endPos[3]}
+        -- Clamp end to last reachable poly if incomplete (pre-alloc buffer)
+        local endPosAdj = self._endPosAdj
+        endPosAdj[1]=endPos[1]; endPosAdj[2]=endPos[2]; endPosAdj[3]=endPos[3]
         if path[npolys] ~= endRef then
-            io.stderr:write("[pathfind] path incomplete — clamping to last reachable poly\n")
+            dbg("path incomplete — clamping to last reachable poly")
             local cp, _ = self._navQuery:closestPointOnPoly(path[npolys], endPos)
             if cp then
                 endPosAdj[1] = cp[1]; endPosAdj[2] = cp[2]; endPosAdj[3] = cp[3]
@@ -233,19 +245,19 @@ function M.new(dataDir, mapId)
         local straightResult, nstraight, _ = self._navQuery:findStraightPath(
             startPos, endPosAdj, path, npolys, MAX_POLYS, 0)
 
-        io.stderr:write(string.format("[pathfind] findStraightPath: %d points\n", nstraight))
+        dbg("findStraightPath: %d points", nstraight)
 
         if nstraight < 2 then return -1.0 end
 
         local total = 0.0
         for k = 1, nstraight - 1 do
-            local a = straightResult[k].pos
-            local b = straightResult[k+1].pos
+            local a = straightResult[k]    -- now plain {x,y,z} (no .pos wrapper)
+            local b = straightResult[k+1]
             local dx = b[1]-a[1]; local dy = b[2]-a[2]; local dz = b[3]-a[3]
             total = total + math.sqrt(dx*dx + dy*dy + dz*dz)
         end
 
-        io.stderr:write(string.format("[pathfind] total distance: %.4f\n", total))
+        dbg("total distance: %.4f", total)
         return total
     end
 
