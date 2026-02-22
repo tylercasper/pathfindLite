@@ -232,3 +232,28 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test L (unsafe lookup in _getPortalPoints + pathBuf)    | 10   | 11,897   | neutral   | Valid path refs → unsafe tile lookup; pre-alloc pathBuf in _getPathToNode                  |
 | Test M (eliminate _floor for type checks + hash hi)     | 10   | 11,714   | **-1.5%** | areaAndtype>=64 replaces _floor(areaAndtype/64); (id-lo)/4294967296 avoids _floor in hash  |
 
+### Session 9 Lua 5.1 Detail
+
+| Test                                                              | Runs | Avg (ms) | vs Prior  | Notes                                                                                                    |
+| ----------------------------------------------------------------- | ---- | -------- | --------- | -------------------------------------------------------------------------------------------------------- |
+| Pre-session-9 baseline                                            | 10   | 11,714   | —         | Same as session 8 end (Test M)                                                                           |
+| Test N (hoist filterAreaCost out of inner link loop)              | 10   | 11,867   | neutral   | Saves 1 GETTABLE+MOD per inner iter; within noise of M baseline                                         |
+| Test O (_floor(side/2)→lookup table; _getPortalPoints _floor fix) | 10   | 11,696   | neutral   | _sideToCS lookup replaces C call; -1.4% vs N but neutral vs M                                          |
+| Test P (1-based heap indexing)                                    | 10   | 11,548   | **-1.4%** | Removes +1 ADD from every heap array access; simplifies parent=_floor(i/2)                              |
+| Test Q (_floor(i/2)→(i-i%2)/2 in _bubbleUp) ❌                   | 10   | 11,717   | regression| Lua % calls floor+mul+sub internally — more expensive than _floor; reverted                             |
+| Test R (NodePool closure upvalues for first/nodes/next/_hashMask) | 10   | 11,525   | neutral   | Eliminates 4 GETTABLE per getNode call; not measurable at this granularity                              |
+| Test S (cache bestTile.links before inner loop)                   | 10   | 11,531   | neutral   | Saves 1 GETTABLE per inner iter; not measurable                                                         |
+| Test T (inline getTileAndPolyByRefUnsafe in findPath inner loop)  | 10   | 11,235   | **-2.6%** | Eliminates method call overhead per A* neighbor; biggest win this session                               |
+| Test U (inline outer loop tile lookup too) ❌                     | 10   | 11,524   | regression| Extra locals in outer loop scope hurt register layout more than call saved; reverted                    |
+
+### Lua 5.1 Baseline Table (updated)
+
+| State                               | Runs | Avg (ms)   | vs Unopt   | Notes                                                              |
+| ----------------------------------- | ---- | ---------- | ---------- | ------------------------------------------------------------------ |
+| Unoptimized (389f7ab, goto-patched) | 10   | **19,498** | —          | Original code with only goto→repeat/if fixes                       |
+| Sessions 1–5 (commit 18542f4)       | 10   | **13,182** | -32.4%     |                                                                    |
+| Sessions 1–6 (commit 80af820)       | 10   | **12,711** | -34.8%     |                                                                    |
+| Sessions 1–7 (commit ac650cf)       | 10   | **11,774** | -39.6%     |                                                                    |
+| Sessions 1–8 (commit 227c76a)       | 10   | **11,714** | -39.9%     |                                                                    |
+| Sessions 1–9 (commit 346ba13)       | 10   | **11,235** | **-42.4%** | Test T: inline getTileAndPolyByRefUnsafe in findPath inner loop    |
+
