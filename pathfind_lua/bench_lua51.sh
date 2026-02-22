@@ -11,13 +11,19 @@ cd "$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 N=${1:-5}
 
-mismatches=$(lua bench.lua orderings.lua --mismatches 2>/dev/null)
+if [ "$(id -u)" = "0" ]; then
+    LUA=(/usr/sbin/taskpolicy -a /usr/bin/nice -n -20 -- lua)
+else
+    LUA=(lua)
+fi
+
+mismatches=$("${LUA[@]}" bench.lua orderings.lua --mismatches 2>/dev/null)
 echo "=== Correctness: $mismatches ==="
 
 total=0
 i=1
 while [ "$i" -le "$N" ]; do
-    result=$(lua bench.lua orderings.lua --timing 2>/dev/null)
+    result=$("${LUA[@]}" bench.lua orderings.lua --timing 2>/dev/null)
     echo "=== Run $i ==="
     echo "$result"
     ms=$(echo "$result" | grep "compute:" | head -1 | grep -oE '[0-9]+\.[0-9]+ ms total' | grep -oE '[0-9]+\.[0-9]+')
