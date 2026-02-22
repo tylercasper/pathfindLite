@@ -166,8 +166,8 @@ local function newNodePool(maxNodes, hashSize)
         -- Reuse existing table to reduce allocation pressure
         local node = _nodes[idx]
         if node then
-            -- pos zeroing removed: _writeMidPoint always overwrites pos before it is read (flags==0 path)
-            node.cost=0; node.total=0; node.pidx=0
+            -- pos/cost/total/pidx resets removed: findPath always writes these before reading them
+            -- (flags=0 path: _writeMidPoint sets pos; inner loop sets cost/total/pidx before push/modify)
             node.state=state; node.flags=0; node.id=id
         else
             node = {
