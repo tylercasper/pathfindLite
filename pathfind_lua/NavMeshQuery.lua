@@ -8,6 +8,8 @@ local DT_NULL_LINK    = nm.DT_NULL_LINK
 local DT_EXT_LINK     = nm.DT_EXT_LINK
 local DT_POLYTYPE_GROUND              = nm.DT_POLYTYPE_GROUND
 local DT_POLYTYPE_OFFMESH_CONNECTION  = nm.DT_POLYTYPE_OFFMESH_CONNECTION
+local DT_TILE_SHIFT   = nm.DT_TILE_SHIFT   -- 2^20 = 1048576; for inlining getTileAndPolyByRefUnsafe
+local DT_TILE_MASK1   = nm.DT_TILE_MASK + 1 -- 2^28; used in modulo for tile index
 
 local dtVdist     = nm.dtVdist
 local dtVdistSqr  = nm.dtVdistSqr
@@ -749,6 +751,7 @@ function M.new(navmesh, maxNodes)
         local filterAreaCost   = filter.areaCost   -- cache for inlined getCost
         local filterInclude    = filter.includeFlags
         local filterExclude    = filter.excludeFlags
+        local _navTiles        = _nav._tiles        -- for inlining getTileAndPolyByRefUnsafe
 
         while not _openList:empty() do
             local bestNode = _openList:pop()
@@ -784,7 +787,10 @@ function M.new(navmesh, maxNodes)
                     break
                 end
 
-                local neighbourTile, neighbourPoly = _nav:getTileAndPolyByRefUnsafe(neighbourRef)
+                -- Inline getTileAndPolyByRefUnsafe: eliminates method call + RETURN overhead
+                local _nip = neighbourRef % DT_TILE_SHIFT
+                local neighbourTile = _navTiles[(neighbourRef - _nip) / DT_TILE_SHIFT % DT_TILE_MASK1 + 1]
+                local neighbourPoly = neighbourTile.polys[_nip + 1]
                 -- Inline passFilter: avoids method call + 2 GETTABLE per neighbor
                 local npf = neighbourPoly.flags
                 if band(npf, filterInclude) == 0 or band(npf, filterExclude) ~= 0 then
