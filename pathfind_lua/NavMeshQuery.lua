@@ -798,8 +798,9 @@ function M.new(navmesh, maxNodes)
                 local neighbourTile = _navTiles[(neighbourRef - _nip) / DT_TILE_SHIFT % DT_TILE_MASK1 + 1]
                 local neighbourPoly = neighbourTile.polys[_nip + 1]
                 -- Inline passFilter: avoids method call + 2 GETTABLE per neighbor
+                -- Short-circuit exclude check: filterExclude is usually 0, skips band() C call
                 local npf = neighbourPoly.flags
-                if band(npf, filterInclude) == 0 or band(npf, filterExclude) ~= 0 then
+                if band(npf, filterInclude) == 0 or (filterExclude ~= 0 and band(npf, filterExclude) ~= 0) then
                     break
                 end
 
