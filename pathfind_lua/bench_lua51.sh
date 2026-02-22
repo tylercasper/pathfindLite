@@ -10,17 +10,14 @@ done
 cd "$(cd -P "$(dirname "$SOURCE")" && pwd)"
 
 N=${1:-5}
-LUA51=/tmp/lua-5.1.5/src/lua
-LUA_CPATH="/tmp/LuaBitOp-1.0.2/?.so"
-export LUA_CPATH
 
-mismatches=$(${LUA51} bench.lua orderings.lua --mismatches 2>/dev/null)
+mismatches=$(lua bench.lua orderings.lua --mismatches 2>/dev/null)
 echo "=== Correctness: $mismatches ==="
 
 total=0
 i=1
 while [ "$i" -le "$N" ]; do
-    result=$(${LUA51} bench.lua orderings.lua --timing 2>/dev/null)
+    result=$(lua bench.lua orderings.lua --timing 2>/dev/null)
     echo "=== Run $i ==="
     echo "$result"
     ms=$(echo "$result" | grep "compute:" | head -1 | grep -oE '[0-9]+\.[0-9]+ ms total' | grep -oE '[0-9]+\.[0-9]+')
