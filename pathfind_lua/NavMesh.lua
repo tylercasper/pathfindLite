@@ -46,7 +46,6 @@ local _slabMax2    = {0,0}       -- calcSlabEndPoints out-buffer: bmax2
 local _conBuf      = {}          -- findConnectingPolys con[] result (reused, read before next call)
 local _conareaBuf  = {}          -- findConnectingPolys conarea[] result (reused)
 local _tilesAt     = {}          -- getTilesAt result buffer (reused across calls)
-local _polyVerts   = {}           -- flat vert array for getPolyHeight (up to 18 entries)
 local _triVa       = {0, 0, 0}   -- triangle vertex a (getPolyHeight)
 local _triVb       = {0, 0, 0}   -- triangle vertex b (getPolyHeight)
 local _triVc       = {0, 0, 0}   -- triangle vertex c (getPolyHeight)
@@ -924,8 +923,8 @@ function M.new(paramsData)
 
     -- getPolyHeight(tile, poly, pos) -> bool, height
     function self:getPolyHeight(tile, poly, pos)
-        local ptype = _floor(poly.areaAndtype / 64)
-        if ptype == DT_POLYTYPE_OFFMESH_CONNECTION then
+        -- areaAndtype >= 64 means OFFMESH; avoids _floor() C call
+        if poly.areaAndtype >= 64 then
             return false, 0
         end
 
@@ -933,20 +932,30 @@ function M.new(paramsData)
         local pd = tile.detailMeshes[ip+1]
         if not pd then return false, 0 end
 
-        -- Build flat verts array for dtPointInPolygon (reuse module-level buffer)
+        -- Inline point-in-polygon test (xz plane) directly via poly.verts + tile.verts.
+        -- Avoids building a flat _polyVerts array then calling dtPointInPolygon;
+        -- saves nv×(3 SETTABLE + 3 GETTABLE) per call when pos is outside poly (common case).
         local nv = poly.vertCount
         local tileVerts = tile.verts
         local polyV = poly.verts
-        for vi = 1, nv do
-            local vidx = polyV[vi]
-            _polyVerts[vi*3-2] = tileVerts[vidx*3+1]
-            _polyVerts[vi*3-1] = tileVerts[vidx*3+2]
-            _polyVerts[vi*3  ] = tileVerts[vidx*3+3]
+        local pt_x = pos[1]; local pt_z = pos[3]
+        local c = false
+        local j = nv
+        for i = 1, nv do
+            local vi_base = polyV[i]*3
+            local vj_base = polyV[j]*3
+            local vi_z = tileVerts[vi_base+3]
+            local vj_z = tileVerts[vj_base+3]
+            if (vi_z > pt_z) ~= (vj_z > pt_z) then
+                local vi_x = tileVerts[vi_base+1]
+                local vj_x = tileVerts[vj_base+1]
+                if pt_x < (vj_x-vi_x)*(pt_z-vi_z)/(vj_z-vi_z) + vi_x then
+                    c = not c
+                end
+            end
+            j = i
         end
-
-        if not dtPointInPolygon(pos, _polyVerts, nv) then
-            return false, 0
-        end
+        if not c then return false, 0 end
 
         -- Fill tri vertices via module-level fillDV (no closure, no allocation)
         local detailTris = tile.detailTris
