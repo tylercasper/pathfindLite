@@ -752,6 +752,7 @@ function M.new(navmesh, maxNodes)
         local filterInclude    = filter.includeFlags
         local filterExclude    = filter.excludeFlags
         local _navTiles        = _nav._tiles        -- for inlining getTileAndPolyByRefUnsafe
+        local _getNode         = _nodePool.getNode  -- cache method ref: saves 1 GETTABLE per inner iter
 
         while not _openList:empty() do
             local bestNode = _openList:pop()
@@ -802,7 +803,7 @@ function M.new(navmesh, maxNodes)
                     crossSide = _sideToCS[link.side + 1]  -- replaces _floor(link.side/2): no C call
                 end
 
-                local neighbourNode = _nodePool:getNode(neighbourRef, crossSide)
+                local neighbourNode = _getNode(_nodePool, neighbourRef, crossSide)
                 if not neighbourNode then
                     outOfNodes = true
                     break
