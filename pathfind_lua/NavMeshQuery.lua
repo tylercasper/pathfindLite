@@ -49,6 +49,11 @@ local _fspRight      = {0,0,0}
 -- closestPointOnPolyBoundary destination buffers (no alloc per call).
 local _fspClosestEnd = {0,0,0}
 
+-- Lookup table: _floor(side/2) for link.side values 0-5 (external links).
+-- Avoids _floor() C call in the hot findPath inner loop.
+-- side: 0->0, 1->0, 2->1, 3->1, 4->2, 5->2  (1-based: index = side+1)
+local _sideToCS = {0, 0, 1, 1, 2, 2}
+
 -- Status flags
 local DT_SUCCESS       = 0x40000000
 local DT_FAILURE       = 0x80000000
@@ -597,8 +602,9 @@ function M.new(navmesh, maxNodes)
         if not self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile) then
             return nil, nil, nil, nil
         end
-        local fromType = _floor(fromPoly.areaAndtype / 64)
-        local toType   = _floor(toPoly.areaAndtype   / 64)
+        -- areaAndtype >= 64 means type == DT_POLYTYPE_OFFMESH_CONNECTION (1); avoids 2 _floor() C calls
+        local fromType = fromPoly.areaAndtype >= 64 and 1 or 0
+        local toType   = toPoly.areaAndtype   >= 64 and 1 or 0
         return _pLeft, _pRight, fromType, toType
     end
 
@@ -783,7 +789,7 @@ function M.new(navmesh, maxNodes)
 
                 local crossSide = 0
                 if link.side ~= 0xff then
-                    crossSide = _floor(link.side / 2)
+                    crossSide = _sideToCS[link.side + 1]  -- replaces _floor(link.side/2): no C call
                 end
 
                 local neighbourNode = _nodePool:getNode(neighbourRef, crossSide)
