@@ -743,7 +743,7 @@ function M.new(navmesh, maxNodes)
         startNode.pidx  = 0
         startNode.cost  = 0
         startNode.total = dtVdist(startPos, endPos) * H_SCALE
-        startNode.id    = startRef
+        -- startNode.id already == startRef from getNode; skip redundant write
         startNode.flags = DT_NODE_OPEN
         _openList:push(startNode)
 
