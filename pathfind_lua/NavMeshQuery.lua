@@ -122,7 +122,9 @@ local function newNodePool(maxNodes, hashSize)
 
     function pool:getNode(id, state)
         -- state is always explicitly provided (0 or crossSide); no default needed
-        local bucket = band(dtHashRef(id), self._hashMask) + 1
+        -- Inline + combine hash: one band() instead of two (dtHashRef + mask)
+        local lo = id % 4294967296
+        local bucket = band(lo * 2654435761 + _floor(id / 4294967296) * 1000003, self._hashMask) + 1
         local first  = self.first
         local nodes  = self.nodes
         local nxt    = self.next
@@ -173,7 +175,8 @@ local function newNodePool(maxNodes, hashSize)
     end
 
     function pool:findNode(id, state)
-        local bucket = band(dtHashRef(id), self._hashMask) + 1
+        local lo = id % 4294967296
+        local bucket = band(lo * 2654435761 + _floor(id / 4294967296) * 1000003, self._hashMask) + 1
         local nodes  = self.nodes
         local nxt    = self.next
         local i = self.first[bucket]
