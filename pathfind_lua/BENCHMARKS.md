@@ -199,6 +199,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | ----------------------------------- | ---- | ----------- | --------- | --------------------------------------------------------------------------- |
 | Unoptimized (389f7ab, goto-patched) | 10   | **19,498.1**| —         | Original code with only goto→repeat/if fixes for Lua 5.1 compat            |
 | Sessions 1–5 (commit 18542f4)       | 10   | **13,182**  | **-32.4%**| All optimizations through Test D (slab/connection alloc elimination)        |
+| Sessions 1–6 (commit 80af820)       | 10   | **12,711**  | **-34.8%**| +Tests E (neutral) and F (findStraightPath pre-alloc)                       |
 
 ### Session 5 Lua 5.1 Detail
 
@@ -207,4 +208,12 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Pre-session-5 baseline (sessions 1–4)       | 10   | 13,648   | —         | Starting point for session 5                                        |
 | Test C (local h in modify + ep removal)     | 10   | 13,648   | neutral   | Kept changes; local h caching and ep alias removal                  |
 | Test D (slab/connection alloc elimination)  | 10   | 13,182   | **-3.4%** | Pre-allocated 10 module-level buffers in NavMesh.lua; committed     |
+
+### Session 6 Lua 5.1 Detail
+
+| Test                                                    | Runs | Avg (ms) | vs Prior  | Notes                                                                                 |
+| ------------------------------------------------------- | ---- | -------- | --------- | ------------------------------------------------------------------------------------- |
+| Pre-session-6 baseline (sessions 1–5)                   | 10   | 13,182   | —         | Starting point for session 6                                                          |
+| Test E (arithmetic flags + field caching in findPath)   | 10   | 13,222   | neutral   | band()→arithmetic for DT_NODE_OPEN/CLOSED; cache self._nodePool/openList/nav as local |
+| Test F (pre-allocate findStraightPath buffers)          | 10   | 12,711   | **-3.6%** | Module-level _fspApex/Left/Right; pre-alloc 256 path point tables; committed          |
 
