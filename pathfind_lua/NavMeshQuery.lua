@@ -42,6 +42,11 @@ local _sqrt  = math.sqrt
 local _pLeft  = {0,0,0}
 local _pRight = {0,0,0}
 
+-- findStraightPath portal apex/left/right buffers (reused every call).
+local _fspApex  = {0,0,0}
+local _fspLeft  = {0,0,0}
+local _fspRight = {0,0,0}
+
 -- Status flags
 local DT_SUCCESS       = 0x40000000
 local DT_FAILURE       = 0x80000000
@@ -323,7 +328,18 @@ function M.new(navmesh, maxNodes)
         _cbVerts      = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0},
         _cbEdged      = {0,0,0,0,0,0},
         _cbEdget      = {0,0,0,0,0,0},
+        -- findStraightPath reusable output arrays (avoids per-call alloc)
+        _spPath       = {},
+        _spFlags      = {},
+        _spRefs       = {},
+        _spCountRef   = {0},
     }
+
+    -- Pre-allocate inner position tables for up to 256 straight-path vertices
+    do
+        local sp = q._spPath
+        for i = 1, 256 do sp[i] = {0,0,0} end
+    end
 
     -- closestPointOnPolyBoundary(ref, pos) -> closest
     function q:closestPointOnPolyBoundary(ref, pos)
@@ -578,7 +594,13 @@ function M.new(navmesh, maxNodes)
         else
             count = count + 1
             countRef[1] = count
-            straightPath[count]      = {pos[1], pos[2], pos[3]}
+            -- Write into pre-allocated table if available; avoids per-vertex alloc
+            local pt = straightPath[count]
+            if pt then
+                pt[1] = pos[1]; pt[2] = pos[2]; pt[3] = pos[3]
+            else
+                straightPath[count] = {pos[1], pos[2], pos[3]}
+            end
             straightPathFlags[count] = flags
             straightPathRefs[count]  = ref
 
@@ -949,23 +971,25 @@ function M.new(navmesh, maxNodes)
         options = options or 0
         maxStraight = maxStraight or 2048
 
-        local straightPath  = {}  -- array of {x,y,z} positions (1-indexed)
-        local spFlags       = {}  -- array of uint8 flags
-        local spRefs        = {}  -- array of poly refs
-        local countRef      = {0}
+        -- Use pre-allocated buffers to avoid per-call table creation
+        local straightPath  = self._spPath
+        local spFlags       = self._spFlags
+        local spRefs        = self._spRefs
+        local countRef      = self._spCountRef
+        countRef[1] = 0  -- reset count
 
         if not path or pathSize <= 0 or not path[1] then
-            return {}, 0, DT_FAILURE + DT_INVALID_PARAM
+            return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
 
         local closestStart = self:closestPointOnPolyBoundary(path[1], startPos)
         if not closestStart then
-            return {}, 0, DT_FAILURE + DT_INVALID_PARAM
+            return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
 
         local closestEnd = self:closestPointOnPolyBoundary(path[pathSize], endPos)
         if not closestEnd then
-            return {}, 0, DT_FAILURE + DT_INVALID_PARAM
+            return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM
         end
 
         -- Add start point
@@ -976,9 +1000,13 @@ function M.new(navmesh, maxNodes)
         end
 
         if pathSize > 1 then
-            local portalApex  = {closestStart[1], closestStart[2], closestStart[3]}
-            local portalLeft  = {closestStart[1], closestStart[2], closestStart[3]}
-            local portalRight = {closestStart[1], closestStart[2], closestStart[3]}
+            -- Use module-level pre-allocated buffers for portal apex/left/right
+            local portalApex  = _fspApex
+            local portalLeft  = _fspLeft
+            local portalRight = _fspRight
+            portalApex[1]=closestStart[1]; portalApex[2]=closestStart[2]; portalApex[3]=closestStart[3]
+            portalLeft[1]=closestStart[1]; portalLeft[2]=closestStart[2]; portalLeft[3]=closestStart[3]
+            portalRight[1]=closestStart[1]; portalRight[2]=closestStart[2]; portalRight[3]=closestStart[3]
             local apexIndex   = 1
             local leftIndex   = 1
             local rightIndex  = 1
@@ -999,7 +1027,7 @@ function M.new(navmesh, maxNodes)
                     if not l2 then
                         -- Failed portal: clamp end to path[i]
                         local ce2 = self:closestPointOnPolyBoundary(path[i], endPos)
-                        if not ce2 then return {}, 0, DT_FAILURE + DT_INVALID_PARAM end
+                        if not ce2 then return straightPath, 0, DT_FAILURE + DT_INVALID_PARAM end
                         closestEnd = ce2
 
                         if (options % 4) >= 1 then  -- area or all crossings
