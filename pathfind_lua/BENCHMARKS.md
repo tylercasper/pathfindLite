@@ -249,6 +249,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test W (cache bestNode.pos/cost/_idx before inner link loop)      | 10   | 11,078   | **-1.4%** | 3 fewer GETTABLE per inner iter (bestNode fields constant across link loop); committed                   |
 | Test X (cache _openList.empty/pop/modify/push method refs) ❌      | 10   | 11,524   | regression| SELF opcode = 1 instr (GETTABLE+MOV); replacing with 2 GETLOCALs adds instructions; reverted            |
 | Test Y (cache endPos/bestNodePos/np components as scalars)         | 10   | 10,941   | **-1.2%** | 9 fewer GETTABLE per inner iter; endPosX/Y/Z at fn scope, bnX/Y/Z before inner loop, npX/Y/Z inline    |
+| Test Z (combine OPEN/CLOSED checks into nf~=0) ❌                  | 10   | 11,368   | regression| Fewer opcodes on paper but slower; two separate if-break pairs seem to predict better; reverted         |
 
 ### Lua 5.1 Baseline Table (updated)
 
