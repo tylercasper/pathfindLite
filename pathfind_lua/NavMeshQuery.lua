@@ -56,6 +56,7 @@ local _fspClosestEnd = {0,0,0}
 -- side: 0->0, 1->0, 2->1, 3->1, 4->2, 5->2  (1-based: index = side+1)
 local _sideToCS = {0, 0, 1, 1, 2, 2}
 
+
 -- Status flags
 local DT_SUCCESS       = 0x40000000
 local DT_FAILURE       = 0x80000000
@@ -136,10 +137,10 @@ local function newNodePool(maxNodes, hashSize)
     end
 
     function pool:getNode(id, state)
-        -- Inline + combine hash; hi=(id-lo)/4294967296 exact; avoids _floor() C call.
+        -- WoW poly refs always fit in 32 bits: lo==id, hi-bits term is always 0.
+        -- Simplified: band(id * 2654435761, _hashMask) saves 1 MOD + SUB + DIV + MUL + ADD.
         -- first/nodes/next/hashMask captured as closure upvalues: no per-call self.field lookup.
-        local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, _hashMask) + 1
+        local bucket = band(id * 2654435761, _hashMask) + 1
         local i = _first[bucket]
         while i ~= 0 do
             local n = _nodes[i]
@@ -187,8 +188,8 @@ local function newNodePool(maxNodes, hashSize)
     end
 
     function pool:findNode(id, state)
-        local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, _hashMask) + 1
+        -- Same simplification as getNode: lo==id for all WoW poly refs
+        local bucket = band(id * 2654435761, _hashMask) + 1
         local i = _first[bucket]
         while i ~= 0 do
             local n = _nodes[i]
