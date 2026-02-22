@@ -769,11 +769,12 @@ function M.new(navmesh, maxNodes)
             end
             -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
-            -- Cache bestPoly area cost: constant for all links of this poly
+            -- Cache bestPoly area cost and tile links: both constant for all links of this poly
             local bestPolyAreaCost = filterAreaCost[bestPoly.areaAndtype % 64]
+            local bestTileLinks = bestTile.links   -- cache: saves 1 GETTABLE per inner iteration
             local li = bestPoly.firstLink
             while li ~= DT_NULL_LINK do
-                local link = bestTile.links[li+1]
+                local link = bestTileLinks[li+1]
                 local neighbourRef = link.ref
                 li = link.next
 
