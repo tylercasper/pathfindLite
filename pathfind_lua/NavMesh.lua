@@ -829,9 +829,10 @@ function M.new(paramsData)
     end
 
     -- getTileAndPolyByRefUnsafe(ref) -> tile, poly
+    -- Inlines decodePolyId and skips salt computation (not needed for unsafe lookup).
     function self:getTileAndPolyByRefUnsafe(ref)
-        local salt, it, ip = decodePolyId(ref)
-        it = it + 1
+        local ip = ref % DT_TILE_SHIFT
+        local it = (ref - ip) / DT_TILE_SHIFT % (DT_TILE_MASK + 1) + 1
         local tile = self._tiles[it]
         return tile, tile.polys[ip+1]
     end
