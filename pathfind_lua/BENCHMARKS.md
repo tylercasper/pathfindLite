@@ -200,6 +200,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Unoptimized (389f7ab, goto-patched) | 10   | **19,498.1**| —         | Original code with only goto→repeat/if fixes for Lua 5.1 compat            |
 | Sessions 1–5 (commit 18542f4)       | 10   | **13,182**  | **-32.4%**| All optimizations through Test D (slab/connection alloc elimination)        |
 | Sessions 1–6 (commit 80af820)       | 10   | **12,711**  | **-34.8%**| +Tests E (neutral) and F (findStraightPath pre-alloc)                       |
+| Sessions 1–7 (commit ac650cf)       | 10   | **11,774**  | **-39.6%**| +Tests G (neutral), H (-4.3% O(1) heap modify), I (neutral), J (-2.4% hash) |
 
 ### Session 5 Lua 5.1 Detail
 
@@ -216,4 +217,14 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Pre-session-6 baseline (sessions 1–5)                   | 10   | 13,182   | —         | Starting point for session 6                                                          |
 | Test E (arithmetic flags + field caching in findPath)   | 10   | 13,222   | neutral   | band()→arithmetic for DT_NODE_OPEN/CLOSED; cache self._nodePool/openList/nav as local |
 | Test F (pre-allocate findStraightPath buffers)          | 10   | 12,711   | **-3.6%** | Module-level _fspApex/Left/Right; pre-alloc 256 path point tables; committed          |
+
+### Session 7 Lua 5.1 Detail
+
+| Test                                                    | Runs | Avg (ms) | vs Prior  | Notes                                                                                      |
+| ------------------------------------------------------- | ---- | -------- | --------- | ------------------------------------------------------------------------------------------ |
+| Pre-session-7 baseline (sessions 1–6)                   | 10   | 12,629   | —         | Starting point for session 7 (Test G baseline = post-F state)                              |
+| Test G (closestPtOnPolyBnd dest-buf + passFilter inline)| 10   | 12,629   | neutral   | dest param eliminates 2-3 allocs/findStraightPath; passFilter inlined in findPath           |
+| Test H (O(1) heap modify via node._hidx tracking)       | 10   | 12,083   | **-4.3%** | _bubbleUp/_trickleDown store _hidx; modify() uses node._hidx directly; no O(n) scan        |
+| Test I (inline decodePolyId in getTileAndPolyByRefUnsafe)| 10  | 12,068   | neutral   | Skip salt computation; avoids decodePolyId function call; not measurable at this scale      |
+| Test J (combine hash in getNode/findNode, 1 band() call)| 10   | 11,774   | **-2.4%** | band(band(x,0xFFFFFFFF),mask)→band(x,mask); eliminates dtHashRef call per getNode invoc.   |
 
