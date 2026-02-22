@@ -676,27 +676,31 @@ function M.new(navmesh, maxNodes)
             return {startRef}, 1, DT_SUCCESS
         end
 
-        self._nodePool:clear()
-        self._openList:clear()
+        local _nodePool = self._nodePool
+        local _openList = self._openList
+        local _nav      = self._nav
 
-        local startNode = self._nodePool:getNode(startRef, 0)
+        _nodePool:clear()
+        _openList:clear()
+
+        local startNode = _nodePool:getNode(startRef, 0)
         dtVcopy(startNode.pos, startPos)
         startNode.pidx  = 0
         startNode.cost  = 0
         startNode.total = dtVdist(startPos, endPos) * H_SCALE
         startNode.id    = startRef
         startNode.flags = DT_NODE_OPEN
-        self._openList:push(startNode)
+        _openList:push(startNode)
 
         local lastBestNode     = startNode
         local lastBestNodeCost = startNode.total
         local outOfNodes = false
         local filterAreaCost   = filter.areaCost   -- cache for inlined getCost
 
-        while not self._openList:empty() do
-            local bestNode = self._openList:pop()
-            -- clear OPEN bit, set CLOSED
-            bestNode.flags = band(bestNode.flags, 0xFFFFFFFE) + DT_NODE_CLOSED
+        while not _openList:empty() do
+            local bestNode = _openList:pop()
+            -- clear OPEN bit (bit 0), set CLOSED (bit 1) — avoids band() C call
+            bestNode.flags = bestNode.flags - (bestNode.flags % 2) + DT_NODE_CLOSED
 
             if bestNode.id == endRef then
                 lastBestNode = bestNode
@@ -704,11 +708,11 @@ function M.new(navmesh, maxNodes)
             end
 
             local bestRef = bestNode.id
-            local bestTile, bestPoly = self._nav:getTileAndPolyByRefUnsafe(bestRef)
+            local bestTile, bestPoly = _nav:getTileAndPolyByRefUnsafe(bestRef)
 
             local parentRef = 0
             if bestNode.pidx ~= 0 then
-                parentRef = self._nodePool:getNodeAtIdx(bestNode.pidx).id
+                parentRef = _nodePool:getNodeAtIdx(bestNode.pidx).id
             end
             -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
@@ -724,7 +728,7 @@ function M.new(navmesh, maxNodes)
                     break
                 end
 
-                local neighbourTile, neighbourPoly = self._nav:getTileAndPolyByRefUnsafe(neighbourRef)
+                local neighbourTile, neighbourPoly = _nav:getTileAndPolyByRefUnsafe(neighbourRef)
                 if not filter:passFilter(neighbourRef, neighbourTile, neighbourPoly) then
                     break
                 end
@@ -734,7 +738,7 @@ function M.new(navmesh, maxNodes)
                     crossSide = _floor(link.side / 2)
                 end
 
-                local neighbourNode = self._nodePool:getNode(neighbourRef, crossSide)
+                local neighbourNode = _nodePool:getNode(neighbourRef, crossSide)
                 if not neighbourNode then
                     outOfNodes = true
                     break
@@ -765,27 +769,30 @@ function M.new(navmesh, maxNodes)
 
                 local total = cost + heuristic
 
-                if band(neighbourNode.flags, DT_NODE_OPEN) ~= 0 and total >= neighbourNode.total then
+                local nf = neighbourNode.flags
+                -- Use arithmetic instead of band() C calls: OPEN=bit0, CLOSED=bit1
+                if nf % 2 ~= 0 and total >= neighbourNode.total then
                     break  -- in open, worse
                 end
-                if band(neighbourNode.flags, DT_NODE_CLOSED) ~= 0 and total >= neighbourNode.total then
+                if nf % 4 >= 2 and total >= neighbourNode.total then
                     break  -- in closed, worse
                 end
 
                 neighbourNode.pidx  = bestNode._idx  -- getNodeIdx inlined: bestNode never nil here
                 neighbourNode.id    = neighbourRef
-                -- clear closed flag
-                if band(neighbourNode.flags, DT_NODE_CLOSED) ~= 0 then
-                    neighbourNode.flags = neighbourNode.flags - DT_NODE_CLOSED
+                -- clear closed flag (subtract bit 1 if set)
+                if nf % 4 >= 2 then
+                    nf = nf - DT_NODE_CLOSED
                 end
                 neighbourNode.cost  = cost
                 neighbourNode.total = total
 
-                if band(neighbourNode.flags, DT_NODE_OPEN) ~= 0 then
-                    self._openList:modify(neighbourNode)
+                if nf % 2 ~= 0 then
+                    neighbourNode.flags = nf
+                    _openList:modify(neighbourNode)
                 else
-                    neighbourNode.flags = neighbourNode.flags + DT_NODE_OPEN
-                    self._openList:push(neighbourNode)
+                    neighbourNode.flags = nf + DT_NODE_OPEN
+                    _openList:push(neighbourNode)
                 end
 
                 if heuristic < lastBestNodeCost then
