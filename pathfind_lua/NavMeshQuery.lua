@@ -337,6 +337,8 @@ function M.new(navmesh, maxNodes)
         _spFlags      = {},
         _spRefs       = {},
         _spCountRef   = {0},
+        -- findPath path output buffer (avoids per-call alloc)
+        _pathBuf      = {},
     }
 
     -- Pre-allocate inner position tables for up to 256 straight-path vertices
@@ -344,10 +346,16 @@ function M.new(navmesh, maxNodes)
         local sp = q._spPath
         for i = 1, 256 do sp[i] = {0,0,0} end
     end
+    -- Pre-size path output buffer to avoid array growth during findPath
+    do
+        local pb = q._pathBuf
+        for i = 1, 512 do pb[i] = 0 end
+    end
 
     -- closestPointOnPolyBoundary(ref, pos[, dest]) -> closest (dest if provided, else new table)
+    -- Uses unsafe tile lookup: callers pass valid path refs (from findPath/findNearestPoly).
     function q:closestPointOnPolyBoundary(ref, pos, dest)
-        local tile, poly = self._nav:getTileAndPolyByRef(ref)
+        local tile, poly = self._nav:getTileAndPolyByRefUnsafe(ref)
         if not tile then return nil end
 
         local verts = self._cbVerts
@@ -582,10 +590,11 @@ function M.new(navmesh, maxNodes)
     end
 
     -- getPortalPoints (ref form) -> _pLeft, _pRight, fromType, toType  (or nil,nil,nil,nil)
+    -- Uses unsafe tile lookup: path refs come from findPath which uses validated refs.
     function q:_getPortalPoints(from, to)
-        local fromTile, fromPoly = self._nav:getTileAndPolyByRef(from)
+        local fromTile, fromPoly = self._nav:getTileAndPolyByRefUnsafe(from)
         if not fromTile then return nil, nil, nil, nil end
-        local toTile, toPoly = self._nav:getTileAndPolyByRef(to)
+        local toTile, toPoly = self._nav:getTileAndPolyByRefUnsafe(to)
         if not toTile then return nil, nil, nil, nil end
 
         if not self:_getPortalPointsFull(from, fromPoly, fromTile, to, toPoly, toTile) then
@@ -669,11 +678,13 @@ function M.new(navmesh, maxNodes)
     -- getPathToNode
     function q:_getPathToNode(endNode, maxPath)
         -- Count length
+        local _getNodeAtIdx = self._nodePool.getNodeAtIdx
+        local _pool = self._nodePool
         local curNode = endNode
         local length = 0
         repeat
             length = length + 1
-            curNode = self._nodePool:getNodeAtIdx(curNode.pidx)
+            curNode = _getNodeAtIdx(_pool, curNode.pidx)
         until not curNode
 
         -- Trim if too long
@@ -681,13 +692,13 @@ function M.new(navmesh, maxNodes)
         local writeCount = length
         for _ = writeCount, maxPath+1, -1 do
             writeCount = writeCount - 1
-            curNode = self._nodePool:getNodeAtIdx(curNode.pidx)
+            curNode = _getNodeAtIdx(_pool, curNode.pidx)
         end
 
-        local path = {}
+        local path = self._pathBuf
         for i = writeCount, 1, -1 do
             path[i] = curNode.id
-            curNode = self._nodePool:getNodeAtIdx(curNode.pidx)
+            curNode = _getNodeAtIdx(_pool, curNode.pidx)
         end
 
         local pathCount = math.min(length, maxPath)
