@@ -13,6 +13,10 @@ N=${1:-5}
 LUA51=/tmp/lua-5.1.5/src/lua
 LUA_CPATH="/tmp/LuaBitOp-1.0.2/?.so"
 export LUA_CPATH
+
+mismatches=$(${LUA51} bench.lua orderings.lua --mismatches 2>/dev/null)
+echo "=== Correctness: $mismatches ==="
+
 total=0
 i=1
 while [ "$i" -le "$N" ]; do
