@@ -108,9 +108,17 @@ local function newNodePool(maxNodes, hashSize)
     for i = 1, hashSize do pool.first[i] = 0 end
     for i = 1, maxNodes do pool.next[i]  = 0 end
 
+    -- Capture table refs and constants as closure upvalues:
+    -- saves self.field GETTABLE overhead on every getNode/findNode call.
+    local _first    = pool.first
+    local _nodes    = pool.nodes
+    local _next     = pool.next
+    local _hashMask = pool._hashMask
+    local _maxNodes = pool.maxNodes
+
     function pool:clear()
         local d, n = self._dirty, self._dirtyN
-        for i = 1, n do self.first[d[i]] = 0 end
+        for i = 1, n do _first[d[i]] = 0 end
         self._dirtyN = 0
         self.nodeCount = 0
     end
@@ -122,33 +130,29 @@ local function newNodePool(maxNodes, hashSize)
 
     function pool:getNodeAtIdx(idx)
         if idx == 0 then return nil end
-        return self.nodes[idx]
+        return _nodes[idx]
     end
 
     function pool:getNode(id, state)
-        -- state is always explicitly provided (0 or crossSide); no default needed
-        -- Inline + combine hash: one band() instead of two (dtHashRef + mask).
-        -- hi = (id - lo) / 4294967296 is exact (id-lo is divisible); avoids _floor() C call.
+        -- Inline + combine hash; hi=(id-lo)/4294967296 exact; avoids _floor() C call.
+        -- first/nodes/next/hashMask captured as closure upvalues: no per-call self.field lookup.
         local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, self._hashMask) + 1
-        local first  = self.first
-        local nodes  = self.nodes
-        local nxt    = self.next
-        local i = first[bucket]
+        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, _hashMask) + 1
+        local i = _first[bucket]
         while i ~= 0 do
-            local n = nodes[i]
+            local n = _nodes[i]
             if n.id == id and n.state == state then
                 return n
             end
-            i = nxt[i]
+            i = _next[i]
         end
 
-        if self.nodeCount >= self.maxNodes then
+        if self.nodeCount >= _maxNodes then
             return nil
         end
 
         -- Track dirty bucket for fast clear
-        if first[bucket] == 0 then
+        if _first[bucket] == 0 then
             local dn = self._dirtyN + 1
             self._dirtyN = dn
             self._dirty[dn] = bucket
@@ -157,7 +161,7 @@ local function newNodePool(maxNodes, hashSize)
         self.nodeCount = self.nodeCount + 1
         local idx = self.nodeCount
         -- Reuse existing table to reduce allocation pressure
-        local node = nodes[idx]
+        local node = _nodes[idx]
         if node then
             local p = node.pos; p[1]=0; p[2]=0; p[3]=0
             node.cost=0; node.total=0; node.pidx=0
@@ -173,25 +177,23 @@ local function newNodePool(maxNodes, hashSize)
                 flags  = 0,
                 id     = id,
             }
-            nodes[idx] = node
+            _nodes[idx] = node
         end
-        nxt[idx]     = first[bucket]
-        first[bucket] = idx
+        _next[idx]    = _first[bucket]
+        _first[bucket] = idx
         return node
     end
 
     function pool:findNode(id, state)
         local lo = id % 4294967296
-        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, self._hashMask) + 1
-        local nodes  = self.nodes
-        local nxt    = self.next
-        local i = self.first[bucket]
+        local bucket = band(lo * 2654435761 + (id - lo) / 4294967296 * 1000003, _hashMask) + 1
+        local i = _first[bucket]
         while i ~= 0 do
-            local n = nodes[i]
+            local n = _nodes[i]
             if n.id == id and n.state == state then
                 return n
             end
-            i = nxt[i]
+            i = _next[i]
         end
         return nil
     end
@@ -229,7 +231,7 @@ local function newNodeQueue(capacity)
     function q:_bubbleUp(i, node)
         local h = self.heap
         while i > 1 do
-            local parent = _floor(i / 2)   -- simpler than (i-1)/2 for 0-based
+            local parent = _floor(i / 2)
             local ph = h[parent]            -- no +1 needed
             if ph.total <= node.total then break end
             h[i] = ph

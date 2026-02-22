@@ -1,6 +1,14 @@
 #!/bin/bash
 # Runs bench.lua N times using the standard Lua 5.1 interpreter and reports per-run and average compute time.
-cd "$(dirname "$0")"
+# Resolves symlinks so this script works when invoked via a symlink from another directory.
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+    DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+    SOURCE="$(readlink "$SOURCE")"
+    [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+cd "$(cd -P "$(dirname "$SOURCE")" && pwd)"
+
 N=${1:-5}
 LUA51=/tmp/lua-5.1.5/src/lua
 LUA_CPATH="/tmp/LuaBitOp-1.0.2/?.so"
