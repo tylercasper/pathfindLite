@@ -687,14 +687,16 @@ function M.new(navmesh, maxNodes)
 
     -- getPathToNode
     function q:_getPathToNode(endNode, maxPath)
+        -- Inline getNodeAtIdx: pool.nodes is same table as _nodes upvalue in getNodeAtIdx.
+        -- pool.nodes[pidx] returns nil when pidx==0 (table miss), matching getNodeAtIdx behaviour.
+        local _poolNodes = self._nodePool.nodes
+
         -- Count length
-        local _getNodeAtIdx = self._nodePool.getNodeAtIdx
-        local _pool = self._nodePool
         local curNode = endNode
         local length = 0
         repeat
             length = length + 1
-            curNode = _getNodeAtIdx(_pool, curNode.pidx)
+            curNode = _poolNodes[curNode.pidx]  -- nil when pidx==0 (root sentinel)
         until not curNode
 
         -- Trim if too long
@@ -702,13 +704,13 @@ function M.new(navmesh, maxNodes)
         local writeCount = length
         for _ = writeCount, maxPath+1, -1 do
             writeCount = writeCount - 1
-            curNode = _getNodeAtIdx(_pool, curNode.pidx)
+            curNode = _poolNodes[curNode.pidx]
         end
 
         local path = self._pathBuf
         for i = writeCount, 1, -1 do
             path[i] = curNode.id
-            curNode = _getNodeAtIdx(_pool, curNode.pidx)
+            curNode = _poolNodes[curNode.pidx]
         end
 
         local pathCount = math.min(length, maxPath)
