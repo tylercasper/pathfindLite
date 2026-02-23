@@ -235,7 +235,7 @@ local function newNodeQueue(capacity)
         local h    = self.heap
         local ntot = node.total  -- cache loop-invariant: saves 1 GETTABLE per iteration
         while i > 1 do
-            local parent = _floor(i / 2)
+            local parent = (i - i%2) / 2  -- floor(i/2) without _floor() C call
             local ph = h[parent]            -- no +1 needed
             if ph.total <= ntot then break end
             h[i] = ph
