@@ -352,6 +352,8 @@ function M.new(navmesh, maxNodes)
         _spCountRef   = {0},
         -- findPath path output buffer (avoids per-call alloc)
         _pathBuf      = {},
+        -- findNearestPoly nearestPt buffer (avoids 1+ alloc per findNearestPoly call)
+        _fnpNearestPt = {0,0,0},
     }
 
     -- Pre-allocate inner position tables for up to 256 straight-path vertices
@@ -421,10 +423,15 @@ function M.new(navmesh, maxNodes)
         local tmpPolys = self._qpiTmp
         local n = self._nav:queryPolygonsInTile(tile, qmin, qmax, tmpPolys, 512)
         local count = 0
+        -- All refs are in the given tile; extract poly index directly (avoids getTileAndPolyByRefUnsafe call).
+        -- Inline passFilter: cache flag fields as locals (avoids method call + 2 GETTABLEs per poly).
+        local tilePolys = tile.polys
+        local fI = filter.includeFlags
+        local fE = filter.excludeFlags
         for k = 1, n do
             local ref = tmpPolys[k]
-            local t2, poly = self._nav:getTileAndPolyByRefUnsafe(ref)
-            if filter:passFilter(ref, t2, poly) then
+            local npf = tilePolys[(ref % DT_TILE_SHIFT) + 1].flags
+            if band(npf, fI) ~= 0 and (fE == 0 or band(npf, fE) == 0) then
                 count = count + 1
                 outPolys[count] = ref
             end
@@ -465,7 +472,9 @@ function M.new(navmesh, maxNodes)
         local polys, polyCount = self:queryPolygons(center, halfExtents, filter)
         local nearest = 0
         local nearestDistSqr = math.huge
-        local nearestPt = {center[1], center[2], center[3]}
+        -- Reuse pre-allocated buffer; avoids 1+ table alloc per call.
+        local nearestPt = self._fnpNearestPt
+        nearestPt[1]=center[1]; nearestPt[2]=center[2]; nearestPt[3]=center[3]
 
         for k = 1, polyCount do
             local ref = polys[k]
@@ -487,7 +496,7 @@ function M.new(navmesh, maxNodes)
             end
 
             if d < nearestDistSqr then
-                nearestPt = {closestPtPoly[1], closestPtPoly[2], closestPtPoly[3]}
+                nearestPt[1]=closestPtPoly[1]; nearestPt[2]=closestPtPoly[2]; nearestPt[3]=closestPtPoly[3]
                 nearestDistSqr = d
                 nearest = ref
             end
@@ -905,15 +914,11 @@ function M.new(navmesh, maxNodes)
 
                 neighbourNode.pidx  = bestNodeIdx    -- getNodeIdx inlined: bestNode never nil here
                 -- neighbourNode.id == neighbourRef already (getNode guarantees it); skip redundant write
-                -- clear closed flag: nf>=2 replaces nf%4>=2 (saves 1 MOD opcode)
-                if nf >= 2 then
-                    nf = nf - DT_NODE_CLOSED
-                end
+                -- nf is 0 (new) or 1 (OPEN) here; CLOSED broke early above — dead nf>=2 branch removed.
                 neighbourNode.cost  = cost
                 neighbourNode.total = total
 
-                -- after clearing: nf is 0 (new/was-closed) or 1 (was-open); nf~=0 replaces nf%2~=0 (saves 1 MOD)
-                -- Inline push/modify + _bubbleUp: saves 2 CALL+RETURN per inner iter; uses total directly
+                -- nf==1: OPEN (modify heap position); nf==0: new (push to heap)
                 if nf ~= 0 then
                     neighbourNode.flags = nf
                     -- inline _openList:modify (= _bubbleUp(node._hidx, node)):
