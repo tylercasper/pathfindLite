@@ -5,6 +5,7 @@
 local NavMeshModule  = require("NavMesh")
 local NavMeshQuery   = require("NavMeshQuery")
 local TerrainMap     = require("TerrainMap")
+local MmapLoader     = require("MmapFileLoader")
 
 local TERRAIN_INVALID_HEIGHT = TerrainMap.TERRAIN_INVALID_HEIGHT
 
@@ -67,20 +68,11 @@ function M.new(dataDir, mapId)
     }
 
     -- Load .mmap params file
-    local mmapPath = string.format("%s/mmaps/%03d.mmap", dataDir, mapId)
-    dbg("loading navmesh params: %s", mmapPath)
-
-    local fp = io.open(mmapPath, "rb")
-    if not fp then
-        dbg("ERROR: could not open %s", mmapPath)
-        return pf
-    end
     -- dtNavMeshParams: orig[3] + tileWidth + tileHeight + maxTiles + maxPolys = 7*4 = 28 bytes
-    local paramsData = fp:read(28)
-    fp:close()
-
-    if not paramsData or #paramsData < 28 then
-        dbg("ERROR: short read of mmap params")
+    local paramsData, mmapPath = MmapLoader.loadNavMeshParams(dataDir, mapId)
+    dbg("loading navmesh params: %s", mmapPath)
+    if not paramsData then
+        dbg("ERROR: could not read %s", mmapPath)
         return pf
     end
 
@@ -100,20 +92,10 @@ function M.new(dataDir, mapId)
         local id = packTileID(tx, ty)
         if self._loadedNavTiles[id] then return true end
 
-        local path = string.format("%s/mmaps/%03d%02d%02d.mmtile",
-            self._dataDir, self._mapId, tx, ty)
+        local data, path = MmapLoader.loadNavTile(self._dataDir, self._mapId, tx, ty)
         dbg("loading nav tile (%d,%d): %s", tx, ty, path)
-
-        local f = io.open(path, "rb")
-        if not f then
-            dbg("WARNING: nav tile not found")
-            return false
-        end
-        local data = f:read("*a")
-        f:close()
-
-        if not data or #data < 20 then
-            dbg("ERROR: short read of mmtile")
+        if not data then
+            dbg("WARNING: nav tile not found or too short")
             return false
         end
 
@@ -155,16 +137,8 @@ function M.new(dataDir, mapId)
 
         local id = packTileID(tx, ty)
         if not self._terrainTiles[id] then
-            local path = string.format("%s/maps/%03d%02d%02d.map",
-                self._dataDir, self._mapId, tx, ty)
+            local data, path = MmapLoader.loadTerrainTile(self._dataDir, self._mapId, tx, ty)
             dbg("loading terrain tile (%d,%d): %s", tx, ty, path)
-
-            local f = io.open(path, "rb")
-            local data = nil
-            if f then
-                data = f:read("*a")
-                f:close()
-            end
 
             local tm = TerrainMap.new(data)
             self._terrainTiles[id] = tm
