@@ -280,6 +280,9 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test ABA (hoist nf=neighbourNode.flags before flags==0 check)         | 50   | 10,183   | neutral   | flags read once instead of twice; committed as code improvement                                                |
 | Test ABB (_floor(i/2)→(i-i%2)/2 in _bubbleUp; no C call)             | 50   | 10,061   | **-1.2%** | Eliminates _floor C call from heap bubble-up hot path; contradicts Test Q but 50-run result is significant    |
 | Test ABC (inline pop+trickleDown+push/modify+bubbleUp in findPath)    | 50   | 9,874    | **-1.9%** | Eliminates 4 CALL+RETURN per A* expansion (pop+trickleDown outer, push/modify+bubbleUp inner); cache _olHeap |
+| Test ABD-v1 (partial getNode inline: inline find, fallback _getNode for alloc) ❌ | 50 | 10,307 | **⚠️ +4.4%** | Double-search on allocation: inline finds nothing → _getNode searches again; reverted |
+| Test ABD-v2 (full getNode inline: both find + alloc paths inlined) ❌   | 50   | 10,334   | **⚠️ +4.7%** | Extra bytecodes in inner loop (find-path + alloc-path inline) cost more than CALL+RETURN saved in Lua 5.1 switch-dispatch; re-tested on quiet machine after I/O clear; reverted |
+| Test ABE (early break for CLOSED neighbours before cost/sqrt; `if nf >= 2 then break end`) | 50 | 9,875 | **≈0% neutral** | CLOSED-node encounters rare in this benchmark; overhead of extra check balances the sqrt savings; committed (neutral per protocol) |
 
 ### Lua 5.1 Baseline Table (updated)
 
