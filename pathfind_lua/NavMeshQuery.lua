@@ -825,6 +825,9 @@ function M.new(navmesh, maxNodes)
                     break
                 end
 
+                -- Hoist np = neighbourNode.pos before flags==0 block; saves 1 GETTABLE per iter
+                -- (previously: local dest = neighbourNode.pos inside the block, and local np after it)
+                local np = neighbourNode.pos
                 if neighbourNode.flags == 0 then
                     -- Inline _writeMidPoint GROUND path; offmesh falls back to method call
                     if bestPolyAT < 64 and neighbourPoly.areaAndtype < 64 then
@@ -833,24 +836,23 @@ function M.new(navmesh, maxNodes)
                         local v1i = bestPolyVerts[(ledge + 1) % bestPolyVC + 1]
                         local v0x = bestTileVerts[v0i*3+1]; local v0y = bestTileVerts[v0i*3+2]; local v0z = bestTileVerts[v0i*3+3]
                         local v1x = bestTileVerts[v1i*3+1]; local v1y = bestTileVerts[v1i*3+2]; local v1z = bestTileVerts[v1i*3+3]
-                        local dest = neighbourNode.pos
                         if lside ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
                             local s = 1.0/255.0
                             local tmin = link.bmin*s; local tmax = link.bmax*s
-                            dest[1]=(v0x+(v1x-v0x)*tmin+v0x+(v1x-v0x)*tmax)*0.5
-                            dest[2]=(v0y+(v1y-v0y)*tmin+v0y+(v1y-v0y)*tmax)*0.5
-                            dest[3]=(v0z+(v1z-v0z)*tmin+v0z+(v1z-v0z)*tmax)*0.5
+                            np[1]=(v0x+(v1x-v0x)*tmin+v0x+(v1x-v0x)*tmax)*0.5
+                            np[2]=(v0y+(v1y-v0y)*tmin+v0y+(v1y-v0y)*tmax)*0.5
+                            np[3]=(v0z+(v1z-v0z)*tmin+v0z+(v1z-v0z)*tmax)*0.5
                         else
-                            dest[1]=(v0x+v1x)*0.5; dest[2]=(v0y+v1y)*0.5; dest[3]=(v0z+v1z)*0.5
+                            np[1]=(v0x+v1x)*0.5; np[2]=(v0y+v1y)*0.5; np[3]=(v0z+v1z)*0.5
                         end
                     else
                         self:_writeMidPoint(bestPoly, bestTile, neighbourPoly, neighbourTile,
-                                            link, bestRef, neighbourNode.pos)
+                                            link, bestRef, np)
                     end
                 end
 
                 -- Inline getCost: dtVdist(pa,pb) * areaCost[curPoly.area]
-                local np = neighbourNode.pos
+                -- np already defined above; npX/Y/Z read below
                 local npX = np[1]; local npY = np[2]; local npZ = np[3]
                 local dx = npX-bnX; local dy = npY-bnY; local dz = npZ-bnZ
                 local curCost = _sqrt(dx*dx+dy*dy+dz*dz) * bestPolyAreaCost
