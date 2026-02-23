@@ -825,10 +825,10 @@ function M.new(navmesh, maxNodes)
                     break
                 end
 
-                -- Hoist np = neighbourNode.pos before flags==0 block; saves 1 GETTABLE per iter
-                -- (previously: local dest = neighbourNode.pos inside the block, and local np after it)
+                -- Hoist np and nf before flags==0 block; saves 1 GETTABLE per iter (flags read once)
                 local np = neighbourNode.pos
-                if neighbourNode.flags == 0 then
+                local nf = neighbourNode.flags
+                if nf == 0 then
                     -- Inline _writeMidPoint GROUND path; offmesh falls back to method call
                     if bestPolyAT < 64 and neighbourPoly.areaAndtype < 64 then
                         local ledge = link.edge
@@ -870,8 +870,7 @@ function M.new(navmesh, maxNodes)
 
                 local total = cost + heuristic
 
-                local nf = neighbourNode.flags
-                -- nf can only be 0 (new), 1 (OPEN), or 2 (CLOSED): use direct comparisons.
+                -- nf already defined above (hoisted); can only be 0 (new), 1 (OPEN), or 2 (CLOSED).
                 -- Combined skip check replaces two separate %2/%4 checks (saves 2 MOD opcodes).
                 if nf ~= 0 and total >= neighbourNode.total then
                     break  -- already in open/closed, worse path
