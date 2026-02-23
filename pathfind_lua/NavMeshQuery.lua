@@ -757,9 +757,10 @@ function M.new(navmesh, maxNodes)
         local filterExclude    = filter.excludeFlags
         local _navTiles        = _nav._tiles        -- for inlining getTileAndPolyByRefUnsafe
         local _getNode         = _nodePool.getNode  -- cache method ref: saves 1 GETTABLE per inner iter
+        local _poolNodes       = _nodePool.nodes    -- for inline getNodeAtIdx in outer loop
         local endPosX = endPos[1]; local endPosY = endPos[2]; local endPosZ = endPos[3]
 
-        while not _openList:empty() do
+        while _openList.size > 0 do  -- replaces :empty() method call
             local bestNode = _openList:pop()
             -- Nodes in heap always have flags=DT_NODE_OPEN(1) when popped; set CLOSED directly
             bestNode.flags = DT_NODE_CLOSED
@@ -774,7 +775,7 @@ function M.new(navmesh, maxNodes)
 
             local parentRef = 0
             if bestNode.pidx ~= 0 then
-                parentRef = _nodePool:getNodeAtIdx(bestNode.pidx).id
+                parentRef = _poolNodes[bestNode.pidx].id  -- inline getNodeAtIdx: saves method call
             end
             -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
@@ -794,6 +795,7 @@ function M.new(navmesh, maxNodes)
                 local link = bestTileLinks[li+1]
                 local neighbourRef = link.ref
                 li = link.next
+                local lside = link.side  -- cache: read 2-3× per iter (crossSide + flags==0 block)
 
                 repeat
 
@@ -813,8 +815,8 @@ function M.new(navmesh, maxNodes)
                 end
 
                 local crossSide = 0
-                if link.side ~= 0xff then
-                    crossSide = _sideToCS[link.side + 1]  -- replaces _floor(link.side/2): no C call
+                if lside ~= 0xff then
+                    crossSide = _sideToCS[lside + 1]  -- replaces _floor(link.side/2): no C call
                 end
 
                 local neighbourNode = _getNode(_nodePool, neighbourRef, crossSide)
@@ -832,7 +834,7 @@ function M.new(navmesh, maxNodes)
                         local v0x = bestTileVerts[v0i*3+1]; local v0y = bestTileVerts[v0i*3+2]; local v0z = bestTileVerts[v0i*3+3]
                         local v1x = bestTileVerts[v1i*3+1]; local v1y = bestTileVerts[v1i*3+2]; local v1z = bestTileVerts[v1i*3+3]
                         local dest = neighbourNode.pos
-                        if link.side ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
+                        if lside ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
                             local s = 1.0/255.0
                             local tmin = link.bmin*s; local tmax = link.bmax*s
                             dest[1]=(v0x+(v1x-v0x)*tmin+v0x+(v1x-v0x)*tmax)*0.5

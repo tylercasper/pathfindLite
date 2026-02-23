@@ -275,6 +275,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AV (inline fillDV×3 + unroll 3-edge loop in closestPtOnDetailEdges; cache pd.triBase) | 20 | 10,518 | **-0.5%** | Saves 3 CALL+RETURN + inner loop + JSEQ/KSEQ/tidx lookups per triangle; committed |
 | Test AW (inline fillDV×3 in getPolyHeight triangle loop)              | 50   | 10,661   | **-2.3%** | Same fillDV inlining for getPolyHeight; runs when pos IS inside poly; committed (new env baseline)   |
 | Test AX (inline _writeMidPoint GROUND path in findPath inner loop)    | 50   | 10,428   | **-2.2%** | Cache bestPolyAT/Verts/VC/TileVerts before inner loop; GROUND inline saves CALL+RETURN+5 GETTABLEs per new-node |
+| Test AY (cache link.side; inline getNodeAtIdx; :empty()→.size>0)      | 50   | 10,290   | **-1.3%** | lside=link.side saves 2 GETTABLE/inner-iter unconditionally; _poolNodes cache; outer loop method call removed  |
 
 ### Lua 5.1 Baseline Table (updated)
 
@@ -301,4 +302,5 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–21 (Test AV, new env)    | 50   | **10,907** | —          | Re-baselined: system lua + sudo taskpolicy/nice-20; σ=226 ms            |
 | Sessions 1–22 (Test AW)             | 50   | **10,661** | **-2.3%**  | Test AW: inline fillDV×3 in getPolyHeight triangle loop; σ≈~220 ms      |
 | Sessions 1–23 (Test AX)             | 50   | **10,428** | **-2.2%**  | Test AX: inline _writeMidPoint GROUND path in findPath; cache bestPolyAT/Verts/VC/TileVerts |
+| Sessions 1–24 (Test AY)             | 50   | **10,290** | **-1.3%**  | Test AY: cache link.side as lside (saves 2 GETTABLE/inner iter); inline getNodeAtIdx; :empty()→.size>0 |
 
