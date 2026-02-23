@@ -270,7 +270,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AR-1 (filterInclude ~= 0xFFFF prefix for band() skip) ❌         | 10   | 10,641   | regression| Extra JMP from `and` operator cancels band() savings; reverted                                        |
 | Test AR-2 (nil sentinel for filterInclude=0xFFFF) ❌                  | 10   | 10,562   | neutral   | nil short-circuits band(); but correctness bug for filterInclude=0 (falsy); reverted                 |
 | Test AS (remove nearestPt alloc from findNearestPoly) ❌              | 20   | 10,868   | regression| Removing 1 alloc/call shifted register layout; 1.1% regression; reverted                             |
-| Test AT (inline getNodeAtIdx in _getPathToNode; pool.nodes[pidx])     | 20   | 10,762   | neutral   | pool.nodes[0]=nil naturally; simpler than method call; committed                                      |
+| Test AT (inline getNodeAtIdx in _getPathToNode; pool.nodes[pidx])     | 20   | 10,762   | ⚠️ +2.3% | Mislabeled "neutral"; actual +2.3% vs AQ (10,525). Committed for code clarity; subsequent wins compensated. |
 | Test AU (inline dtPointInPolygon in getPolyHeight; skip _polyVerts)   | 20   | 10,572   | **-1.7%** | Saves nv×6 ops when pos outside poly (common); areaAndtype>=64 skips _floor; committed               |
 | Test AV (inline fillDV×3 + unroll 3-edge loop in closestPtOnDetailEdges; cache pd.triBase) | 20 | 10,518 | **-0.5%** | Saves 3 CALL+RETURN + inner loop + JSEQ/KSEQ/tidx lookups per triangle; committed |
 | Test AW (inline fillDV×3 in getPolyHeight triangle loop)              | 50   | 10,661   | **-2.3%** | Same fillDV inlining for getPolyHeight; runs when pos IS inside poly; committed (new env baseline)   |
@@ -279,6 +279,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Test AZ (hoist np=neighbourNode.pos before flags==0 block)            | 50   | 10,182   | **-1.1%** | Saves 1 GETTABLE per inner iter; eliminates dest local; np used directly for writes in inline+fallback path   |
 | Test ABA (hoist nf=neighbourNode.flags before flags==0 check)         | 50   | 10,183   | neutral   | flags read once instead of twice; committed as code improvement                                                |
 | Test ABB (_floor(i/2)→(i-i%2)/2 in _bubbleUp; no C call)             | 50   | 10,061   | **-1.2%** | Eliminates _floor C call from heap bubble-up hot path; contradicts Test Q but 50-run result is significant    |
+| Test ABC (inline pop+trickleDown+push/modify+bubbleUp in findPath)    | 50   | 9,874    | **-1.9%** | Eliminates 4 CALL+RETURN per A* expansion (pop+trickleDown outer, push/modify+bubbleUp inner); cache _olHeap |
 
 ### Lua 5.1 Baseline Table (updated)
 
@@ -299,7 +300,7 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–16 (Test AO)             | 10   | **10,490** | **-46.2%** | Test AO: remove cost/total/pidx resets in getNode reuse path        |
 | Sessions 1–17 (Test AP)             | —    | **~10,490**| **-46.2%** | Test AP: remove dead startNode.id = startRef write (trivial)        |
 | Sessions 1–18 (Test AQ)             | 10   | **10,525** | **-46.0%** | Test AQ: replace MOD-based flag checks with direct comparisons      |
-| Sessions 1–19 (Test AT)             | 20   | **10,762** | **-44.8%** | Test AT: inline getNodeAtIdx (neutral; committed for code clarity)  |
+| Sessions 1–19 (Test AT)             | 20   | **10,762** | ⚠️ +2.3% vs AQ | Test AT: inline getNodeAtIdx — mislabeled "neutral"; appears to be a +2.3% regression vs AQ (10,525 ms). Committed for code clarity; subsequent wins compensated. |
 | Sessions 1–20 (Test AU)             | 20   | **10,572** | **-45.8%** | Test AU: inline dtPointInPolygon in getPolyHeight; skip _polyVerts  |
 | Sessions 1–21 (Test AV)             | 20   | **10,518** | **-46.1%** | Test AV: inline fillDV×3 + unroll edge loop in closestPointOnDetailEdges |
 | Sessions 1–21 (Test AV, new env)    | 50   | **10,907** | —          | Re-baselined: system lua + sudo taskpolicy/nice-20; σ=226 ms            |
@@ -309,4 +310,5 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–25 (Test AZ)             | 50   | **10,182** | **-1.1%**  | Test AZ: hoist np=neighbourNode.pos before flags==0 block; saves 1 GETTABLE/inner iter, removes dest local |
 | Sessions 1–25b (Test ABA)           | 50   | **10,183** | neutral    | Test ABA: hoist nf=neighbourNode.flags before flags==0 check; committed for code clarity                   |
 | Sessions 1–26 (Test ABB)            | 50   | **10,061** | **-1.2%**  | Test ABB: (i-i%2)/2 replaces _floor(i/2) in _bubbleUp; eliminates C call from heap hot path               |
+| Sessions 1–27 (Test ABC)            | 50   | **9,874**  | **-1.9%**  | Test ABC: inline pop+trickleDown + push/modify+bubbleUp into findPath; eliminates 4 CALL+RETURN per A* node |
 

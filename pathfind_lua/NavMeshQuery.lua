@@ -758,10 +758,35 @@ function M.new(navmesh, maxNodes)
         local _navTiles        = _nav._tiles        -- for inlining getTileAndPolyByRefUnsafe
         local _getNode         = _nodePool.getNode  -- cache method ref: saves 1 GETTABLE per inner iter
         local _poolNodes       = _nodePool.nodes    -- for inline getNodeAtIdx in outer loop
+        local _olHeap          = _openList.heap     -- for inlined push/pop/modify heap operations
         local endPosX = endPos[1]; local endPosY = endPos[2]; local endPosZ = endPos[3]
 
-        while _openList.size > 0 do  -- replaces :empty() method call
-            local bestNode = _openList:pop()
+        while _openList.size > 0 do
+            -- Inline _openList:pop() + _trickleDown: saves 2 CALL+RETURN per outer iteration
+            local bestNode = _olHeap[1]
+            local _olSz    = _openList.size
+            local _tdNode  = _olHeap[_olSz]
+            _olSz = _olSz - 1
+            _openList.size = _olSz
+            if _olSz > 0 then
+                local _tdNtot = _tdNode.total
+                local _tdi = 1
+                while true do
+                    local _tdc = _tdi * 2
+                    if _tdc > _olSz then break end
+                    local _tdc1 = _olHeap[_tdc]
+                    if _tdc < _olSz and _tdc1.total > _olHeap[_tdc + 1].total then
+                        _tdc = _tdc + 1
+                        _tdc1 = _olHeap[_tdc]
+                    end
+                    if _tdNtot <= _tdc1.total then break end
+                    _olHeap[_tdi] = _tdc1
+                    _tdc1._hidx = _tdi
+                    _tdi = _tdc
+                end
+                _olHeap[_tdi] = _tdNode
+                _tdNode._hidx = _tdi
+            end
             -- Nodes in heap always have flags=DT_NODE_OPEN(1) when popped; set CLOSED directly
             bestNode.flags = DT_NODE_CLOSED
 
@@ -886,12 +911,37 @@ function M.new(navmesh, maxNodes)
                 neighbourNode.total = total
 
                 -- after clearing: nf is 0 (new/was-closed) or 1 (was-open); nf~=0 replaces nf%2~=0 (saves 1 MOD)
+                -- Inline push/modify + _bubbleUp: saves 2 CALL+RETURN per inner iter; uses total directly
                 if nf ~= 0 then
                     neighbourNode.flags = nf
-                    _openList:modify(neighbourNode)
+                    -- inline _openList:modify (= _bubbleUp(node._hidx, node)):
+                    local _bhi = neighbourNode._hidx
+                    while _bhi > 1 do
+                        local _bpar = (_bhi - _bhi%2) / 2
+                        local _bph = _olHeap[_bpar]
+                        if _bph.total <= total then break end
+                        _olHeap[_bhi] = _bph
+                        _bph._hidx = _bhi
+                        _bhi = _bpar
+                    end
+                    _olHeap[_bhi] = neighbourNode
+                    neighbourNode._hidx = _bhi
                 else
-                    neighbourNode.flags = nf + DT_NODE_OPEN
-                    _openList:push(neighbourNode)
+                    neighbourNode.flags = DT_NODE_OPEN
+                    -- inline _openList:push (size++ + _bubbleUp(new_size, node)):
+                    local _olNewSz = _openList.size + 1
+                    _openList.size = _olNewSz
+                    local _bhi = _olNewSz
+                    while _bhi > 1 do
+                        local _bpar = (_bhi - _bhi%2) / 2
+                        local _bph = _olHeap[_bpar]
+                        if _bph.total <= total then break end
+                        _olHeap[_bhi] = _bph
+                        _bph._hidx = _bhi
+                        _bhi = _bpar
+                    end
+                    _olHeap[_bhi] = neighbourNode
+                    neighbourNode._hidx = _bhi
                 end
 
                 if heuristic < lastBestNodeCost then
