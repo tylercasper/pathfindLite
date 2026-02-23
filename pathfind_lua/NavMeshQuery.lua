@@ -778,9 +778,13 @@ function M.new(navmesh, maxNodes)
             end
             -- parentTile/parentPoly removed: inlined getCost doesn't use them
 
-            -- Cache bestPoly area cost and tile links: both constant for all links of this poly
-            local bestPolyAreaCost = filterAreaCost[bestPoly.areaAndtype % 64]
-            local bestTileLinks = bestTile.links   -- cache: saves 1 GETTABLE per inner iteration
+            -- Cache bestPoly area cost and tile locals: all constant for all links of this poly
+            local bestPolyAT      = bestPoly.areaAndtype
+            local bestPolyAreaCost = filterAreaCost[bestPolyAT % 64]
+            local bestPolyVerts   = bestPoly.verts     -- for inline _writeMidPoint
+            local bestPolyVC      = bestPoly.vertCount -- for inline _writeMidPoint
+            local bestTileLinks   = bestTile.links     -- cache: saves 1 GETTABLE per inner iteration
+            local bestTileVerts   = bestTile.verts     -- for inline _writeMidPoint
             local bestNodePos  = bestNode.pos      -- cache: saves 1 GETTABLE per inner iteration
             local bestNodeCost = bestNode.cost     -- cache: saves 1-2 GETTABLE per inner iteration
             local bestNodeIdx  = bestNode._idx     -- cache: saves 1 GETTABLE per inner iteration
@@ -820,9 +824,27 @@ function M.new(navmesh, maxNodes)
                 end
 
                 if neighbourNode.flags == 0 then
-                    -- Pass link directly: avoids re-searching link list inside _writeMidPoint
-                    self:_writeMidPoint(bestPoly, bestTile, neighbourPoly, neighbourTile,
-                                        link, bestRef, neighbourNode.pos)
+                    -- Inline _writeMidPoint GROUND path; offmesh falls back to method call
+                    if bestPolyAT < 64 and neighbourPoly.areaAndtype < 64 then
+                        local ledge = link.edge
+                        local v0i = bestPolyVerts[ledge + 1]
+                        local v1i = bestPolyVerts[(ledge + 1) % bestPolyVC + 1]
+                        local v0x = bestTileVerts[v0i*3+1]; local v0y = bestTileVerts[v0i*3+2]; local v0z = bestTileVerts[v0i*3+3]
+                        local v1x = bestTileVerts[v1i*3+1]; local v1y = bestTileVerts[v1i*3+2]; local v1z = bestTileVerts[v1i*3+3]
+                        local dest = neighbourNode.pos
+                        if link.side ~= 0xff and (link.bmin ~= 0 or link.bmax ~= 255) then
+                            local s = 1.0/255.0
+                            local tmin = link.bmin*s; local tmax = link.bmax*s
+                            dest[1]=(v0x+(v1x-v0x)*tmin+v0x+(v1x-v0x)*tmax)*0.5
+                            dest[2]=(v0y+(v1y-v0y)*tmin+v0y+(v1y-v0y)*tmax)*0.5
+                            dest[3]=(v0z+(v1z-v0z)*tmin+v0z+(v1z-v0z)*tmax)*0.5
+                        else
+                            dest[1]=(v0x+v1x)*0.5; dest[2]=(v0y+v1y)*0.5; dest[3]=(v0z+v1z)*0.5
+                        end
+                    else
+                        self:_writeMidPoint(bestPoly, bestTile, neighbourPoly, neighbourTile,
+                                            link, bestRef, neighbourNode.pos)
+                    end
                 end
 
                 -- Inline getCost: dtVdist(pa,pb) * areaCost[curPoly.area]
