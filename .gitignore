@@ -1,1 +1,10 @@
 .DS_Store
+
+# pathfind_lua generated artifacts
+pathfind_lua/generated_addons_*/
+pathfind_lua/required_*.txt
+pathfind_lua/orderings_auto_*.lua
+pathfind_lua/orderings_min.lua
+pathfind_lua/_tmp*
+
+**/__pycache__/

@@ -5,7 +5,11 @@
 local NavMeshModule  = require("NavMesh")
 local NavMeshQuery   = require("NavMeshQuery")
 local TerrainMap     = require("TerrainMap")
-local MmapLoader     = require("MmapFileLoader")
+local loaderModule = (type(_G) == "table" and rawget(_G, "MmapLoaderModule")) or nil
+if type(loaderModule) ~= "string" or loaderModule == "" then
+    loaderModule = "MmapFileLoader"
+end
+local MmapLoader     = require(loaderModule)
 
 local TERRAIN_INVALID_HEIGHT = TerrainMap.TERRAIN_INVALID_HEIGHT
 
