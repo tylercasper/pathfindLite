@@ -296,4 +296,5 @@ Platform: macOS Darwin 24.3.0, Lua 5.1
 | Sessions 1–19 (Test AT)             | 20   | **10,762** | **-44.8%** | Test AT: inline getNodeAtIdx (neutral; committed for code clarity)  |
 | Sessions 1–20 (Test AU)             | 20   | **10,572** | **-45.8%** | Test AU: inline dtPointInPolygon in getPolyHeight; skip _polyVerts  |
 | Sessions 1–21 (Test AV)             | 20   | **10,518** | **-46.1%** | Test AV: inline fillDV×3 + unroll edge loop in closestPointOnDetailEdges |
+| Sessions 1–21 (Test AV, new env)    | 50   | **10,907** | —          | Re-baselined: system lua + sudo taskpolicy/nice-20; σ=226 ms            |
 

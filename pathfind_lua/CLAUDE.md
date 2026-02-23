@@ -32,7 +32,7 @@ standard Lua 5.1 interpreter. Keep it as a sanity-check guard only.
 |---------|-------------|-------|
 | HEAD (389f7ab, unoptimized) | ~TBD | goto-only fix needed to run; see BENCHMARKS.md |
 | After sessions 1–5 (18542f4) | **13,182 ms** | 10-run avg (old environment) |
-| Test AV (a02a4e9, current HEAD) | **TBD** | 50-run avg with sudo; new baseline pending |
+| Test AV (a02a4e9, current HEAD) | **10,907 ms** | 50-run sudo avg (σ=226 ms); current baseline |
 
 **8 pre-existing mismatches** (pairs 25, 29, 33, 37, 41, 45, 47, 90) are
 floating-point precision differences vs C++, NOT regressions.

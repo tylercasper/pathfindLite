@@ -994,18 +994,38 @@ function M.new(paramsData)
         end
         if not c then return false, 0 end
 
-        -- Fill tri vertices via module-level fillDV (no closure, no allocation)
-        local detailTris = tile.detailTris
+        -- Find height from detail triangles (inline fillDV × 3 to save CALL+RETURN overhead)
+        local detailTris  = tile.detailTris
         local detailVerts = tile.detailVerts
-        local pdVertBase = pd.vertBase
-        local pdTriBase  = pd.triBase
+        local pdVertBase  = pd.vertBase
+        local pdTriBase   = pd.triBase
 
-        -- Find height from detail triangles
         for ti = 0, pd.triCount - 1 do
             local tidx = (pdTriBase + ti) * 4 + 1
-            fillDV(_triVa, detailTris[tidx],   tileVerts, detailVerts, polyV, nv, pdVertBase)
-            fillDV(_triVb, detailTris[tidx+1], tileVerts, detailVerts, polyV, nv, pdVertBase)
-            fillDV(_triVc, detailTris[tidx+2], tileVerts, detailVerts, polyV, nv, pdVertBase)
+            local d0 = detailTris[tidx]
+            if d0 < nv then
+                local vi = polyV[d0+1]
+                _triVa[1]=tileVerts[vi*3+1]; _triVa[2]=tileVerts[vi*3+2]; _triVa[3]=tileVerts[vi*3+3]
+            else
+                local dvi = pdVertBase + (d0 - nv)
+                _triVa[1]=detailVerts[dvi*3+1]; _triVa[2]=detailVerts[dvi*3+2]; _triVa[3]=detailVerts[dvi*3+3]
+            end
+            local d1 = detailTris[tidx+1]
+            if d1 < nv then
+                local vi = polyV[d1+1]
+                _triVb[1]=tileVerts[vi*3+1]; _triVb[2]=tileVerts[vi*3+2]; _triVb[3]=tileVerts[vi*3+3]
+            else
+                local dvi = pdVertBase + (d1 - nv)
+                _triVb[1]=detailVerts[dvi*3+1]; _triVb[2]=detailVerts[dvi*3+2]; _triVb[3]=detailVerts[dvi*3+3]
+            end
+            local d2 = detailTris[tidx+2]
+            if d2 < nv then
+                local vi = polyV[d2+1]
+                _triVc[1]=tileVerts[vi*3+1]; _triVc[2]=tileVerts[vi*3+2]; _triVc[3]=tileVerts[vi*3+3]
+            else
+                local dvi = pdVertBase + (d2 - nv)
+                _triVc[1]=detailVerts[dvi*3+1]; _triVc[2]=detailVerts[dvi*3+2]; _triVc[3]=detailVerts[dvi*3+3]
+            end
 
             local ok, h = dtClosestHeightPointTriangle(pos, _triVa, _triVb, _triVc)
             if ok then
