@@ -99,5 +99,8 @@ function M.loadTerrainTile(dataDir, mapId, tx, ty)
   return data, path
 end
 
+if package and package.loaded then
+  package.loaded["MmapRecordingFileLoader"] = M
+end
 return M
 

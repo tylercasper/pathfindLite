@@ -16,7 +16,18 @@ local TERRAIN_INVALID_HEIGHT = TerrainMap.TERRAIN_INVALID_HEIGHT
 -- Set PathFinderDebug = false before requiring this module to suppress log output.
 local function dbg(fmt, ...)
     if PathFinderDebug == false then return end
-    io.stderr:write(string.format("[pathfind] " .. fmt .. "\n", ...))
+    local msg = string.format("[pathfind] " .. fmt, ...)
+    local qhs = rawget(_G, "QHS")
+    if type(qhs) == "table" and type(qhs.chat) == "function" then
+        -- Route through qhstub's logger so it persists into SavedVariables.
+        qhs.chat(msg)
+    elseif type(io) == "table" and io.stderr and type(io.stderr.write) == "function" then
+        io.stderr:write(msg .. "\n")
+    elseif type(DEFAULT_CHAT_FRAME) == "table" and type(DEFAULT_CHAT_FRAME.AddMessage) == "function" then
+        DEFAULT_CHAT_FRAME:AddMessage(msg)
+    elseif type(print) == "function" then
+        print(msg)
+    end
 end
 
 local M = {}
@@ -115,17 +126,22 @@ function M.new(dataDir, mapId)
     end
 
     -- ensureNavTilesLoaded(x1, y1, x2, y2)
+    -- Loads all nav tiles covering the bounding box of (x1,y1)-(x2,y2), plus TILE_PADDING
+    -- tiles of margin on each side.  A* paths can leave the straight-line bounding box when
+    -- routing around terrain, so the extra margin prevents "tile not loaded" failures.
+    local TILE_PADDING = 1
     function pf:ensureNavTilesLoaded(x1, y1, x2, y2)
         local tx1, ty1 = worldToTile(x1, y1)
         local tx2, ty2 = worldToTile(x2, y2)
         if not tx1 or not tx2 then return end
 
-        local txMin = math.min(tx1, tx2)
-        local txMax = math.max(tx1, tx2)
-        local tyMin = math.min(ty1, ty2)
-        local tyMax = math.max(ty1, ty2)
+        -- Lua analyzer may infer nil; guard is above, values are integers here.
+        local txMin = math.max(0,  math.min(tx1, tx2) - TILE_PADDING)
+        local txMax = math.min(63, math.max(tx1, tx2) + TILE_PADDING)
+        local tyMin = math.max(0,  math.min(ty1, ty2) - TILE_PADDING)
+        local tyMax = math.min(63, math.max(ty1, ty2) + TILE_PADDING)
 
-        dbg("tile range x:[%d,%d] y:[%d,%d]", txMin, txMax, tyMin, tyMax)
+        dbg("tile range x:[%d,%d] y:[%d,%d]", txMin or 0, txMax or 0, tyMin or 0, tyMax or 0)
 
         for tx = txMin, txMax do
             for ty = tyMin, tyMax do
@@ -156,19 +172,18 @@ function M.new(dataDir, mapId)
         return h
     end
 
-    -- computeDistance(x1, y1, x2, y2) -> distance or -1
-    function pf:computeDistance(x1, y1, x2, y2)
-        dbg("computeDistance (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
-
+    -- _run_query(x1, y1, x2, y2) -> straightResult, nstraight, total  or  nil, 0, -1
+    -- Shared body used by computeDistance and computePath.
+    function pf:_run_query(x1, y1, x2, y2)
         if math.abs(x1) > WORLD_MAX or math.abs(y1) > WORLD_MAX or
            math.abs(x2) > WORLD_MAX or math.abs(y2) > WORLD_MAX then
             dbg("ERROR: coordinates exceed world bounds")
-            return -1.0
+            return nil, 0, -1.0
         end
 
         if not self._initialized then
             dbg("ERROR: not initialized")
-            return -1.0
+            return nil, 0, -1.0
         end
 
         self:ensureNavTilesLoaded(x1, y1, x2, y2)
@@ -178,7 +193,7 @@ function M.new(dataDir, mapId)
 
         if z1 == TERRAIN_INVALID_HEIGHT or z2 == TERRAIN_INVALID_HEIGHT then
             dbg("ERROR: terrain height lookup failed (z1=%.2f z2=%.2f)", z1, z2)
-            return -1.0
+            return nil, 0, -1.0
         end
 
         -- Fill pre-allocated recast buffers (avoids 2 table allocs per call)
@@ -200,14 +215,14 @@ function M.new(dataDir, mapId)
 
         if not startRef or startRef == 0 or not endRef or endRef == 0 then
             dbg("ERROR: could not find nearest poly")
-            return -1.0
+            return nil, 0, -1.0
         end
 
         local path, npolys, status = self._navQuery:findPath(
             startRef, endRef, startPos, endPos, filter, MAX_POLYS)
         dbg("findPath: %d polys", npolys)
 
-        if npolys == 0 then return -1.0 end
+        if npolys == 0 then return nil, 0, -1.0 end
 
         -- Clamp end to last reachable poly if incomplete (pre-alloc buffer)
         local endPosAdj = self._endPosAdj
@@ -225,18 +240,44 @@ function M.new(dataDir, mapId)
 
         dbg("findStraightPath: %d points", nstraight)
 
-        if nstraight < 2 then return -1.0 end
+        if nstraight < 2 then return nil, 0, -1.0 end
 
         local total = 0.0
         for k = 1, nstraight - 1 do
-            local a = straightResult[k]    -- now plain {x,y,z} (no .pos wrapper)
+            local a = straightResult[k]
             local b = straightResult[k+1]
             local dx = b[1]-a[1]; local dy = b[2]-a[2]; local dz = b[3]-a[3]
             total = total + math.sqrt(dx*dx + dy*dy + dz*dz)
         end
 
         dbg("total distance: %.4f", total)
+        return straightResult, nstraight, total
+    end
+
+    -- computeDistance(x1, y1, x2, y2) -> distance or -1
+    function pf:computeDistance(x1, y1, x2, y2)
+        dbg("computeDistance (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
+        local _, _, total = self:_run_query(x1, y1, x2, y2)
         return total
+    end
+
+    -- computePath(x1, y1, x2, y2) -> waypoints, total_dist  or  nil, -1
+    -- waypoints is an array of {wx, wy} in WoW world-yard coordinates.
+    -- Recast stores points as {wow_y, wow_z, wow_x}, so wx=[3], wy=[1].
+    function pf:computePath(x1, y1, x2, y2)
+        dbg("computePath (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
+        local straightResult, nstraight, total = self:_run_query(x1, y1, x2, y2)
+        if not straightResult then
+            return nil, -1.0
+        end
+
+        local waypoints = {}
+        for k = 1, nstraight do
+            local pt = straightResult[k]   -- {wow_y, wow_z, wow_x}
+            waypoints[k] = { pt[3], pt[1] }  -- {wx, wy}
+        end
+
+        return waypoints, total
     end
 
     function pf:isValid()
@@ -246,4 +287,7 @@ function M.new(dataDir, mapId)
     return pf
 end
 
+if package and package.loaded then
+    package.loaded["PathFinder"] = M
+end
 return M

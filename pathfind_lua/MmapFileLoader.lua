@@ -44,4 +44,7 @@ function M.loadTerrainTile(dataDir, mapId, tx, ty)
     return data, path  -- nil data is OK (terrain tile may be absent)
 end
 
+if package and package.loaded then
+    package.loaded["MmapFileLoader"] = M
+end
 return M

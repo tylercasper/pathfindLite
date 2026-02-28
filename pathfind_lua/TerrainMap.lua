@@ -78,6 +78,28 @@ function M.new(data)
     -- Initialize holes to 0
     for k = 1, 256 do tm._holes[k] = 0 end
 
+    -- Define methods up-front so callers can safely use them even when load fails.
+    function tm:isLoaded()
+        return self._loaded
+    end
+
+    -- getHeight(x, y) -> height in WoW world units
+    function tm:getHeight(x, y)
+        if not self._loaded then
+            return TERRAIN_INVALID_HEIGHT
+        end
+        if self._mode == "flat" then
+            return self._gridHeight
+        elseif self._mode == "float" then
+            return self:_getHeightFromFloat(x, y)
+        elseif self._mode == "uint8" then
+            return self:_getHeightFromUint8(x, y)
+        elseif self._mode == "uint16" then
+            return self:_getHeightFromUint16(x, y)
+        end
+        return TERRAIN_INVALID_HEIGHT
+    end
+
     if not data or #data < 40 then
         return tm
     end
@@ -89,7 +111,9 @@ function M.new(data)
     versionMagic,i = bin.readU32(data, i)
 
     if mapMagic ~= MAP_MAGIC or versionMagic ~= MAP_VERSION_MAGIC then
-        io.stderr:write("[terrain] bad map magic\n")
+        if io and io.stderr and io.stderr.write then
+            io.stderr:write("[terrain] bad map magic\n")
+        end
         return tm
     end
 
@@ -124,7 +148,9 @@ function M.new(data)
         gridMaxHeight, hi = bin.readFloat(data, hi)
 
         if fourcc ~= MAP_HEIGHT_MAGIC then
-            io.stderr:write("[terrain] bad height magic\n")
+            if io and io.stderr and io.stderr.write then
+                io.stderr:write("[terrain] bad height magic\n")
+            end
             return tm
         end
 
@@ -183,24 +209,6 @@ function M.new(data)
     end
 
     tm._loaded = true
-
-    -- getHeight(x, y) -> height in WoW world units
-    function tm:getHeight(x, y)
-        if self._mode == "flat" then
-            return self._gridHeight
-        elseif self._mode == "float" then
-            return self:_getHeightFromFloat(x, y)
-        elseif self._mode == "uint8" then
-            return self:_getHeightFromUint8(x, y)
-        elseif self._mode == "uint16" then
-            return self:_getHeightFromUint16(x, y)
-        end
-        return TERRAIN_INVALID_HEIGHT
-    end
-
-    function tm:isLoaded()
-        return self._loaded
-    end
 
     function tm:_getHeightFromFloat(x, y)
         if not self._V8 or not self._V9 then return TERRAIN_INVALID_HEIGHT end
@@ -353,4 +361,7 @@ end
 
 M.TERRAIN_INVALID_HEIGHT = TERRAIN_INVALID_HEIGHT
 
+if package and package.loaded then
+    package.loaded["TerrainMap"] = M
+end
 return M

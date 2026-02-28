@@ -1302,4 +1302,7 @@ end
 
 M.newFilter = newFilter
 
+if package and package.loaded then
+    package.loaded["NavMeshQuery"] = M
+end
 return M

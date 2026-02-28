@@ -1518,4 +1518,7 @@ function M.dtIntersectSegmentPoly2D(p0, p1, verts, nverts)
     return true, tmin, tmax, segMin, segMax
 end
 
+if package and package.loaded then
+    package.loaded["NavMesh"] = M
+end
 return M

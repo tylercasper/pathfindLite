@@ -74,4 +74,8 @@ function M.readU64(s, i)
     return lo + hi * 4294967296, ni2
 end
 
+if package and package.loaded then
+    package.loaded["binary"] = M
+end
 return M
+

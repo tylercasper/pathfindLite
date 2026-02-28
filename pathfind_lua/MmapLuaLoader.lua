@@ -31,6 +31,24 @@ local CORE_LIBDEFLATE_FILENAME = "LibDeflate.lua"
 local loaded_addons = {}
 local missing_addons = {}
 
+local function dbg(msg)
+  if not rawget(_G, "MmapLuaLoaderDebug") then return end
+  local qhs = rawget(_G, "QHS")
+  if type(qhs) == "table" and type(qhs.chat) == "function" then
+    qhs.chat(msg)
+  elseif type(DEFAULT_CHAT_FRAME) == "table" and type(DEFAULT_CHAT_FRAME.AddMessage) == "function" then
+    DEFAULT_CHAT_FRAME:AddMessage(tostring(msg))
+  elseif type(print) == "function" then
+    print(tostring(msg))
+  end
+end
+
+local function dbgf(fmt, ...)
+  if not rawget(_G, "MmapLuaLoaderDebug") then return end
+  local ok, s = pcall(string.format, tostring(fmt), ...)
+  dbg(ok and s or fmt)
+end
+
 -- ---------------------------------------------------------------------------
 -- QuestHelper-style adaptint + BST index lookup (ported from qhstub_db.lua)
 -- ---------------------------------------------------------------------------
@@ -80,7 +98,29 @@ end
 -- ---------------------------------------------------------------------------
 
 local function is_wow_runtime()
-  return type(LoadAddOn) == "function" and type(IsAddOnLoaded) == "function"
+  -- Prefer positive detection of external Lua (dofile available).
+  -- In WoW, dofile is not available but LoadAddOn is.
+  if type(dofile) == "function" then return false end
+  local LoadAddOn = rawget(_G, "LoadAddOn")
+  if type(LoadAddOn) == "function" then return true end
+  local C_AddOns = rawget(_G, "C_AddOns")
+  if type(C_AddOns) == "table" and type(C_AddOns.LoadAddOn) == "function" then return true end
+  return false
+end
+
+local function wow_addon_api()
+  local _LoadAddOn = rawget(_G, "LoadAddOn")
+  local _IsAddOnLoaded = rawget(_G, "IsAddOnLoaded")
+  local _GetAddOnEnableState = rawget(_G, "GetAddOnEnableState")
+
+  local C_AddOns = rawget(_G, "C_AddOns")
+  if type(C_AddOns) == "table" then
+    if type(_LoadAddOn) ~= "function" then _LoadAddOn = C_AddOns.LoadAddOn end
+    if type(_IsAddOnLoaded) ~= "function" then _IsAddOnLoaded = C_AddOns.IsAddOnLoaded end
+    if type(_GetAddOnEnableState) ~= "function" then _GetAddOnEnableState = C_AddOns.GetAddOnEnableState end
+  end
+
+  return _LoadAddOn, _IsAddOnLoaded, _GetAddOnEnableState
 end
 
 local function join_path(a, b)
@@ -138,26 +178,53 @@ local function get_libdeflate()
 end
 
 local function ensure_addon_loaded(dataDir, addonName, addonFolderHint, luaFileNameHint)
-  if missing_addons[addonName] then return false end
+  if missing_addons[addonName] then
+    dbgf("mmaplua: skip LoadAddOn(%s); previously failed reason=%s", tostring(addonName), tostring(missing_addons[addonName]))
+    return false
+  end
   if loaded_addons[addonName] then return true end
 
   if is_wow_runtime() then
-    if IsAddOnLoaded(addonName) then
+    local _LoadAddOn, _IsAddOnLoaded, _GetAddOnEnableState = wow_addon_api()
+    if type(_IsAddOnLoaded) == "function" and _IsAddOnLoaded(addonName) then
       loaded_addons[addonName] = true
       return true
     end
-    local ok = LoadAddOn(addonName)
+    local debug = rawget(_G, "MmapLuaLoaderDebug")
+    local t0 = (debug and type(debugprofilestop) == "function") and debugprofilestop() or nil
+    if debug then
+      dbgf("mmaplua: runtime=WoW LoadAddOn=%s IsAddOnLoaded=%s dofile=%s",
+        tostring(type(_LoadAddOn)), tostring(type(_IsAddOnLoaded)), tostring(type(dofile)))
+      local en = (type(_GetAddOnEnableState) == "function" and type(UnitName) == "function")
+        and _GetAddOnEnableState(UnitName("player"), addonName)
+        or nil
+      dbgf("mmaplua: LoadAddOn(%s) ... (enableState=%s)", tostring(addonName), tostring(en))
+    end
+    local ok, reason
+    if type(_LoadAddOn) == "function" then
+      ok, reason = _LoadAddOn(addonName)
+    end
+    if debug then
+      local dt = (t0 and type(debugprofilestop) == "function") and (debugprofilestop() - t0) or nil
+      dbgf("mmaplua: LoadAddOn(%s) -> ok=%s reason=%s (%s ms)",
+        tostring(addonName), tostring(ok), tostring(reason), dt and string.format("%.0f", dt) or "?")
+    end
     if ok then
       loaded_addons[addonName] = true
       return true
     end
-    missing_addons[addonName] = true
+    if debug then
+      local loaded = (type(_IsAddOnLoaded) == "function") and _IsAddOnLoaded(addonName) or nil
+      dbgf("mmaplua: load FAILED for %s (IsAddOnLoaded=%s)", tostring(addonName), tostring(loaded))
+    end
+    missing_addons[addonName] = reason or true
     return false
   end
 
   -- External environment: dofile the shard Lua file directly.
   if type(dofile) ~= "function" then
-    missing_addons[addonName] = true
+    dbgf("mmaplua: runtime=UNKNOWN (no LoadAddOn, no dofile) addon=%s", tostring(addonName))
+    -- Don't cache this as "missing": we might be in WoW but can't see LoadAddOn here.
     return false
   end
 
@@ -183,8 +250,12 @@ local function ensure_core_loaded(dataDir)
 
   -- WoW: attempt LoadAddOn(core) if possible (core should normally be enabled/loaded).
   if is_wow_runtime() then
+    dbgf("mmaplua: ensure_core_loaded prefix=%s", tostring(prefix))
     ensure_addon_loaded(dataDir, prefix, prefix, CORE_LUA_FILENAME)
     db = rawget(_G, "MmapLuaDB")
+    dbgf("mmaplua: core loaded? db=%s params=%s",
+      tostring(type(db)),
+      tostring(type(db) == "table" and type(rawget(db, "params")) or nil))
     return type(db) == "table" and type(db.params) == "table"
   end
 
@@ -217,7 +288,11 @@ local function ensure_shard_loaded(dataDir, mapId, sx, sy)
 
   local prefix = resolve_addon_prefix()
   local addonName = string.format("%s_%03d_%02d_%02d", prefix, mapId, sx, sy)
+  dbgf("mmaplua: ensure_shard_loaded %s (map=%d sx=%d sy=%d)", tostring(addonName), mapId, sx, sy)
   ensure_addon_loaded(dataDir, addonName, addonName, SHARD_LUA_FILENAME)
+  if not get_shard_table(mapId, sx, sy) then
+    dbgf("mmaplua: shard table missing after load (map=%d sx=%d sy=%d)", mapId, sx, sy)
+  end
   return not not get_shard_table(mapId, sx, sy)
 end
 
@@ -312,5 +387,8 @@ function M.loadTerrainTile(dataDir, mapId, tx, ty)
   return bytes, path
 end
 
+if package and package.loaded then
+  package.loaded["MmapLuaLoader"] = M
+end
 return M
 
