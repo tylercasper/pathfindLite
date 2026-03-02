@@ -49,6 +49,21 @@ local function dbgf(fmt, ...)
   dbg(ok and s or fmt)
 end
 
+-- err() is like dbg() but always emits (not gated on MmapLuaLoaderDebug).
+-- Use for failure paths that are always worth knowing about.
+local function err(fmt, ...)
+  local ok, s = pcall(string.format, tostring(fmt), ...)
+  local msg = "[mmaplua] " .. (ok and s or tostring(fmt))
+  local qhs = rawget(_G, "QHS")
+  if type(qhs) == "table" and type(qhs.chat) == "function" then
+    qhs.chat(msg)
+  elseif type(DEFAULT_CHAT_FRAME) == "table" and type(DEFAULT_CHAT_FRAME.AddMessage) == "function" then
+    DEFAULT_CHAT_FRAME:AddMessage(msg)
+  elseif type(print) == "function" then
+    print(msg)
+  end
+end
+
 -- ---------------------------------------------------------------------------
 -- QuestHelper-style adaptint + BST index lookup (ported from qhstub_db.lua)
 -- ---------------------------------------------------------------------------
@@ -191,7 +206,7 @@ local function ensure_addon_loaded(dataDir, addonName, addonFolderHint, luaFileN
       return true
     end
     local debug = rawget(_G, "MmapLuaLoaderDebug")
-    local t0 = (debug and type(debugprofilestop) == "function") and debugprofilestop() or nil
+    local t0 = (type(debugprofilestop) == "function") and debugprofilestop() or nil
     if debug then
       dbgf("mmaplua: runtime=WoW LoadAddOn=%s IsAddOnLoaded=%s dofile=%s",
         tostring(type(_LoadAddOn)), tostring(type(_IsAddOnLoaded)), tostring(type(dofile)))
@@ -204,8 +219,8 @@ local function ensure_addon_loaded(dataDir, addonName, addonFolderHint, luaFileN
     if type(_LoadAddOn) == "function" then
       ok, reason = _LoadAddOn(addonName)
     end
+    local dt = (t0 and type(debugprofilestop) == "function") and (debugprofilestop() - t0) or nil
     if debug then
-      local dt = (t0 and type(debugprofilestop) == "function") and (debugprofilestop() - t0) or nil
       dbgf("mmaplua: LoadAddOn(%s) -> ok=%s reason=%s (%s ms)",
         tostring(addonName), tostring(ok), tostring(reason), dt and string.format("%.0f", dt) or "?")
     end
@@ -213,10 +228,11 @@ local function ensure_addon_loaded(dataDir, addonName, addonFolderHint, luaFileN
       loaded_addons[addonName] = true
       return true
     end
-    if debug then
-      local loaded = (type(_IsAddOnLoaded) == "function") and _IsAddOnLoaded(addonName) or nil
-      dbgf("mmaplua: load FAILED for %s (IsAddOnLoaded=%s)", tostring(addonName), tostring(loaded))
-    end
+    -- Always log LoadAddOn failures so we can see them without MmapLuaLoaderDebug.
+    local is_loaded_after = (type(_IsAddOnLoaded) == "function") and _IsAddOnLoaded(addonName) or nil
+    err("LoadAddOn(%s) FAILED: ok=%s reason=%s IsAddOnLoaded=%s ms=%s",
+      tostring(addonName), tostring(ok), tostring(reason),
+      tostring(is_loaded_after), dt and string.format("%.0f", dt) or "?")
     missing_addons[addonName] = reason or true
     return false
   end
@@ -256,7 +272,13 @@ local function ensure_core_loaded(dataDir)
     dbgf("mmaplua: core loaded? db=%s params=%s",
       tostring(type(db)),
       tostring(type(db) == "table" and type(rawget(db, "params")) or nil))
-    return type(db) == "table" and type(db.params) == "table"
+    local ok = type(db) == "table" and type(db.params) == "table"
+    if not ok then
+      err("core addon '%s' not ready after load: MmapLuaDB=%s params=%s",
+        tostring(prefix), tostring(type(db)),
+        tostring(type(db) == "table" and type(rawget(db, "params")) or nil))
+    end
+    return ok
   end
 
   -- External: dofile LibDeflate.lua then core DB.
@@ -292,6 +314,15 @@ local function ensure_shard_loaded(dataDir, mapId, sx, sy)
   ensure_addon_loaded(dataDir, addonName, addonName, SHARD_LUA_FILENAME)
   if not get_shard_table(mapId, sx, sy) then
     dbgf("mmaplua: shard table missing after load (map=%d sx=%d sy=%d)", mapId, sx, sy)
+    -- Always log: shard table absent after load attempt means either LoadAddOn failed
+    -- (already logged above) or the addon loaded but didn't populate MmapLuaDB.shards.
+    local db = rawget(_G, "MmapLuaDB")
+    local shards = (type(db) == "table") and rawget(db, "shards") or nil
+    local mtab = (type(shards) == "table") and shards[mapId] or nil
+    local stab = (type(mtab) == "table") and mtab[sx] or nil
+    err("shard '%s' table missing after load: shards[%d]=%s [%d]=%s [%d]=%s",
+      tostring(addonName), mapId, tostring(type(shards)),
+      sx, tostring(type(mtab)), sy, tostring(type(stab)))
   end
   return not not get_shard_table(mapId, sx, sy)
 end
@@ -352,13 +383,24 @@ function M.loadNavTile(dataDir, mapId, tx, ty)
 
   local shard = get_shard_table(mapId, sx, sy)
   local nav = shard and shard.nav
-  if type(nav) ~= "table" then return nil, path end
+  if type(nav) ~= "table" then
+    err("nav tile (%d,%d) map=%d: shard(%d,%d) dim=%d has no nav table (nav=%s)",
+      tx, ty, mapId, sx, sy, shardDim, tostring(type(nav)))
+    return nil, path
+  end
 
-  local comp = search_index(nav.serialize_index, nav.serialize_data, tile_key(tx, ty))
-  if type(comp) ~= "string" or comp == "" then return nil, path end
+  local key = tile_key(tx, ty)
+  local comp = search_index(nav.serialize_index, nav.serialize_data, key)
+  if type(comp) ~= "string" or comp == "" then
+    dbgf("mmaplua: nav tile (%d,%d) key=%d not in index (count=%s)",
+      tx, ty, key, tostring(nav.count))
+    return nil, path
+  end
 
-  local bytes = decompress_deflate(comp)
+  local bytes, decomp_err = decompress_deflate(comp)
   if type(bytes) ~= "string" or #bytes < 20 then
+    err("nav tile (%d,%d) map=%d: decompression failed or too short (%s, len=%s)",
+      tx, ty, mapId, tostring(decomp_err), tostring(bytes and #bytes or "nil"))
     return nil, path
   end
   return bytes, path
@@ -375,15 +417,26 @@ function M.loadTerrainTile(dataDir, mapId, tx, ty)
 
   local shard = get_shard_table(mapId, sx, sy)
   local terr = shard and shard.terrain
-  if type(terr) ~= "table" then return nil, path end
+  if type(terr) ~= "table" then
+    err("terrain tile (%d,%d) map=%d: shard(%d,%d) dim=%d has no terrain table (terrain=%s)",
+      tx, ty, mapId, sx, sy, shardDim, tostring(type(terr)))
+    return nil, path
+  end
 
-  local comp = search_index(terr.serialize_index, terr.serialize_data, tile_key(tx, ty))
+  local key = tile_key(tx, ty)
+  local comp = search_index(terr.serialize_index, terr.serialize_data, key)
   if type(comp) ~= "string" or comp == "" then
+    dbgf("mmaplua: terrain tile (%d,%d) key=%d not in index (count=%s)",
+      tx, ty, key, tostring(terr.count))
     return nil, path -- missing terrain tile is OK
   end
 
-  local bytes = decompress_deflate(comp)
-  if type(bytes) ~= "string" then return nil, path end
+  local bytes, decomp_err = decompress_deflate(comp)
+  if type(bytes) ~= "string" then
+    err("terrain tile (%d,%d) map=%d: decompression failed (%s)",
+      tx, ty, mapId, tostring(decomp_err))
+    return nil, path
+  end
   return bytes, path
 end
 

@@ -31,6 +31,7 @@ Indexing:
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
 import os
 import re
 import sys
@@ -222,6 +223,85 @@ class TileRef:
         raise RuntimeError("shard_xy requires shard_dim; compute externally")
 
 
+def _build_store(tile_paths: Dict[int, Path], level: int) -> Tuple[bytes, bytes, int]:
+    # Returns (serialize_index, serialize_data, count)
+    if not tile_paths:
+        return encode_adaptint(0), b"", 0
+
+    data_blob = bytearray()
+    entries: Dict[int, Tuple[int, int]] = {}
+    for k in sorted(tile_paths.keys()):
+        raw = tile_paths[k].read_bytes()
+        comp = deflate_raw(raw, level=level)
+        ofs = len(data_blob) + 1  # 1-based for Lua
+        data_blob.extend(comp)
+        entries[k] = (ofs, len(comp) - 1)
+    index_blob = build_bst_index(entries)
+    return index_blob, bytes(data_blob), len(tile_paths)
+
+
+def _generate_shard(
+    output_dir: Path,
+    addon_prefix: str,
+    map_id: int,
+    sx: int,
+    sy: int,
+    nav_map: Dict[int, Path],
+    terr_map: Dict[int, Path],
+    interface: int,
+    level: int,
+    safe_ascii: bool,
+) -> str:
+    # Runs in a worker process. Returns the addon name on success.
+    addon_name = f"{addon_prefix}_{map_id:03d}_{sx:02d}_{sy:02d}"
+    shard_dir = output_dir / addon_name
+    shard_dir.mkdir(parents=True, exist_ok=True)
+
+    # Shard .toc (LoadOnDemand)
+    toc_text = "\n".join(
+        [
+            f"## Interface: {interface}",
+            f"## Title: {addon_name}",
+            "## Notes: mmap shard blob (generated).",
+            "## Version: 1",
+            "## LoadOnDemand: 1",
+            f"## Dependencies: {addon_prefix}",
+            "",
+            "data.lua",
+            "",
+        ]
+    )
+    write_text_file(shard_dir / f"{addon_name}.toc", toc_text)
+
+    nav_index, nav_data, nav_count = _build_store(nav_map, level)
+    terr_index, terr_data, terr_count = _build_store(terr_map, level)
+
+    lua_path = shard_dir / "data.lua"
+    with lua_path.open("wb") as fp:
+        fp.write(b"-- data.lua (generated)\n")
+        fp.write(b"MmapLuaDB = MmapLuaDB or {}\n")
+        fp.write(b"MmapLuaDB.shards = MmapLuaDB.shards or {}\n")
+        fp.write(f"local mapId = {map_id}\n".encode("ascii"))
+        fp.write(f"local sx = {sx}\n".encode("ascii"))
+        fp.write(f"local sy = {sy}\n".encode("ascii"))
+        fp.write(b"MmapLuaDB.shards[mapId] = MmapLuaDB.shards[mapId] or {}\n")
+        fp.write(b"MmapLuaDB.shards[mapId][sx] = MmapLuaDB.shards[mapId][sx] or {}\n")
+        fp.write(b"MmapLuaDB.shards[mapId][sx][sy] = {\n")
+        fp.write(b"\tnav = {\n")
+        write_lua_kv_string(fp, "serialize_index", nav_index, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
+        write_lua_kv_string(fp, "serialize_data", nav_data, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
+        fp.write(f"\t\tcount = {nav_count},\n".encode("ascii"))
+        fp.write(b"\t},\n")
+        fp.write(b"\tterrain = {\n")
+        write_lua_kv_string(fp, "serialize_index", terr_index, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
+        write_lua_kv_string(fp, "serialize_data", terr_data, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
+        fp.write(f"\t\tcount = {terr_count},\n".encode("ascii"))
+        fp.write(b"\t},\n")
+        fp.write(b"}\n")
+
+    return addon_name
+
+
 def parse_args(argv: List[str]) -> argparse.Namespace:
     ap = argparse.ArgumentParser(description="Convert .mmap/.mmtile/.map dataset to sharded Lua blob addons.")
     ap.add_argument("--input-data-dir", required=True, help="Directory containing mmaps/ and maps/ subfolders.")
@@ -256,6 +336,12 @@ def parse_args(argv: List[str]) -> argparse.Namespace:
         "--map-ids",
         default="",
         help="Optional comma-separated list of map IDs to include (e.g. 0,1,530). If empty, includes all found.",
+    )
+    ap.add_argument(
+        "--workers",
+        type=int,
+        default=0,
+        help="Number of worker processes for shard generation (default 0 = CPU count).",
     )
     return ap.parse_args(argv)
 
@@ -494,80 +580,32 @@ def main(argv: List[str]) -> int:
     shard_keys = set(nav_tiles.keys()) | set(terr_tiles.keys())
     shard_keys = {k for k in shard_keys if (restrict_maps is None or k[0] in restrict_maps)}
 
-    def shard_addon_name(map_id: int, sx: int, sy: int) -> str:
-        return f"{addon_prefix}_{map_id:03d}_{sx:02d}_{sy:02d}"
+    workers = args.workers if args.workers > 0 else None  # None -> ProcessPoolExecutor uses cpu_count()
 
-    for (map_id, sx, sy) in sorted(shard_keys):
-        addon_name = shard_addon_name(map_id, sx, sy)
-        shard_dir = output_dir / addon_name
-        shard_dir.mkdir(parents=True, exist_ok=True)
-
-        # Shard .toc (LoadOnDemand)
-        toc_path = shard_dir / f"{addon_name}.toc"
-        toc_text = "\n".join(
-            [
-                f"## Interface: {interface}",
-                f"## Title: {addon_name}",
-                "## Notes: mmap shard blob (generated).",
-                "## Version: 1",
-                "## LoadOnDemand: 1",
-                f"## Dependencies: {addon_prefix}",
-                "",
-                "data.lua",
-                "",
-            ]
+    shard_jobs = [
+        (
+            output_dir,
+            addon_prefix,
+            map_id, sx, sy,
+            nav_tiles.get((map_id, sx, sy), {}),
+            terr_tiles.get((map_id, sx, sy), {}),
+            interface,
+            level,
+            safe_ascii,
         )
-        write_text_file(toc_path, toc_text)
+        for (map_id, sx, sy) in sorted(shard_keys)
+    ]
 
-        # Build stores for nav and terrain
-        nav_map = nav_tiles.get((map_id, sx, sy), {})
-        terr_map = terr_tiles.get((map_id, sx, sy), {})
+    total = len(shard_jobs)
+    done = 0
+    with concurrent.futures.ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_generate_shard, *job): job for job in shard_jobs}
+        for fut in concurrent.futures.as_completed(futures):
+            addon_name = fut.result()  # raises on worker exception
+            done += 1
+            print(f"[{done}/{total}] {addon_name}")
 
-        def build_store(tile_paths: Dict[int, Path]) -> Tuple[bytes, bytes, int]:
-            # Returns (serialize_index, serialize_data, count)
-            if not tile_paths:
-                return encode_adaptint(0), b"", 0
-
-            data_blob = bytearray()
-            entries: Dict[int, Tuple[int, int]] = {}
-            for k in sorted(tile_paths.keys()):
-                p = tile_paths[k]
-                raw = p.read_bytes()
-                comp = deflate_raw(raw, level=level)
-                ofs = len(data_blob) + 1  # 1-based for Lua
-                data_blob.extend(comp)
-                entries[k] = (ofs, len(comp) - 1)
-            index_blob = build_bst_index(entries)
-            return index_blob, bytes(data_blob), len(tile_paths)
-
-        nav_index, nav_data, nav_count = build_store(nav_map)
-        terr_index, terr_data, terr_count = build_store(terr_map)
-
-        # Write shard Lua file (binary)
-        lua_path = shard_dir / "data.lua"
-        with lua_path.open("wb") as fp:
-            fp.write(b"-- data.lua (generated)\n")
-            fp.write(b"MmapLuaDB = MmapLuaDB or {}\n")
-            fp.write(b"MmapLuaDB.shards = MmapLuaDB.shards or {}\n")
-            fp.write(f"local mapId = {map_id}\n".encode("ascii"))
-            fp.write(f"local sx = {sx}\n".encode("ascii"))
-            fp.write(f"local sy = {sy}\n".encode("ascii"))
-            fp.write(b"MmapLuaDB.shards[mapId] = MmapLuaDB.shards[mapId] or {}\n")
-            fp.write(b"MmapLuaDB.shards[mapId][sx] = MmapLuaDB.shards[mapId][sx] or {}\n")
-            fp.write(b"MmapLuaDB.shards[mapId][sx][sy] = {\n")
-            fp.write(b"\tnav = {\n")
-            write_lua_kv_string(fp, "serialize_index", nav_index, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
-            write_lua_kv_string(fp, "serialize_data", nav_data, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
-            fp.write(f"\t\tcount = {nav_count},\n".encode("ascii"))
-            fp.write(b"\t},\n")
-            fp.write(b"\tterrain = {\n")
-            write_lua_kv_string(fp, "serialize_index", terr_index, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
-            write_lua_kv_string(fp, "serialize_data", terr_data, indent="\t\t", wrap_bytes=120, safe_ascii=safe_ascii)
-            fp.write(f"\t\tcount = {terr_count},\n".encode("ascii"))
-            fp.write(b"\t},\n")
-            fp.write(b"}\n")
-
-    print(f"Generated core + {len(shard_keys)} shard addons under: {output_dir}")
+    print(f"Generated core + {total} shard addons under: {output_dir}")
     return 0
 
 
