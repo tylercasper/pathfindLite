@@ -14,12 +14,9 @@ local MmapLoader     = require(loaderModule)
 local TERRAIN_INVALID_HEIGHT = TerrainMap.TERRAIN_INVALID_HEIGHT
 
 -- Set PathFinderDebug = false before requiring this module to suppress log output.
-local function dbg(fmt, ...)
-    if PathFinderDebug == false then return end
-    local msg = string.format("[pathfind] " .. fmt, ...)
+local function _log(msg)
     local qhs = rawget(_G, "QHS")
     if type(qhs) == "table" and type(qhs.chat) == "function" then
-        -- Route through qhstub's logger so it persists into SavedVariables.
         qhs.chat(msg)
     elseif type(io) == "table" and io.stderr and type(io.stderr.write) == "function" then
         io.stderr:write(msg .. "\n")
@@ -28,6 +25,14 @@ local function dbg(fmt, ...)
     elseif type(print) == "function" then
         print(msg)
     end
+end
+local function dbg(fmt, ...)
+    if PathFinderDebug == false then return end
+    _log(string.format("[pathfind] " .. fmt, ...))
+end
+-- info() always logs regardless of PathFinderDebug.
+local function info(fmt, ...)
+    _log(string.format("[pathfind] " .. fmt, ...))
 end
 
 local M = {}
@@ -110,13 +115,23 @@ function M.new(dataDir, mapId)
         local data, path = MmapLoader.loadNavTile(self._dataDir, self._mapId, tx, ty)
         dbg("loading nav tile (%d,%d): %s", tx, ty, path)
         if not data then
-            dbg("WARNING: nav tile not found or too short")
+            dbg("WARNING: nav tile (%d,%d) not found or too short — skipping", tx, ty)
+            self._loadedNavTiles[id] = true  -- mark as tried so we don't retry on every query
             return false
         end
 
         local ok, err = self._navMesh:addTile(data)
         if not ok then
-            dbg("ERROR: addTile failed: %s", tostring(err))
+            -- Always log addTile failures; they indicate data or parse problems.
+            local msg = string.format("[pathfind] ERROR: addTile(%d,%d) failed: %s", tx, ty, tostring(err))
+            local qhs = rawget(_G, "QHS")
+            if type(qhs) == "table" and type(qhs.chat) == "function" then
+                qhs.chat(msg)
+            elseif type(DEFAULT_CHAT_FRAME) == "table" and type(DEFAULT_CHAT_FRAME.AddMessage) == "function" then
+                DEFAULT_CHAT_FRAME:AddMessage(msg)
+            elseif type(print) == "function" then
+                print(msg)
+            end
             return false
         end
 
@@ -148,6 +163,102 @@ function M.new(dataDir, mapId)
                 self:loadNavTile(tx, ty)
             end
         end
+    end
+
+    -- _pendingTiles(x1, y1, x2, y2) -> array of {tx, ty} not yet loaded
+    function pf:_pendingTiles(x1, y1, x2, y2)
+        local tx1, ty1 = worldToTile(x1, y1)
+        local tx2, ty2 = worldToTile(x2, y2)
+        if not tx1 or not tx2 then return {} end
+
+        local txMin = math.max(0,  math.min(tx1, tx2) - TILE_PADDING)
+        local txMax = math.min(63, math.max(tx1, tx2) + TILE_PADDING)
+        local tyMin = math.max(0,  math.min(ty1, ty2) - TILE_PADDING)
+        local tyMax = math.min(63, math.max(ty1, ty2) + TILE_PADDING)
+
+        local pending = {}
+        for tx = txMin, txMax do
+            for ty = tyMin, tyMax do
+                if not self._loadedNavTiles[packTileID(tx, ty)] then
+                    pending[#pending + 1] = {tx, ty}
+                end
+            end
+        end
+        return pending
+    end
+
+    -- _scheduleAsync(workFn, onDone)
+    -- Calls workFn() once per C_Timer.After(0) tick until it returns true, then calls onDone().
+    -- Falls back to synchronous execution if C_Timer is unavailable.
+    local function _scheduleAsync(workFn, onDone)
+        local C_Timer = rawget(_G, "C_Timer")
+        if type(C_Timer) ~= "table" or type(C_Timer.After) ~= "function" then
+            -- No timer available (external/test env): run synchronously.
+            while not workFn() do end
+            onDone()
+            return
+        end
+        local function tick()
+            if workFn() then
+                onDone()
+            else
+                C_Timer.After(0, tick)
+            end
+        end
+        C_Timer.After(0, tick)
+    end
+
+    -- computePathAsync(x1, y1, x2, y2, callback)
+    -- Loads required nav tiles one per frame tick, then runs the pathfind query.
+    -- callback(waypoints, total_dist) on success, callback(nil, -1) on failure.
+    function pf:computePathAsync(x1, y1, x2, y2, callback)
+        dbg("computePathAsync (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
+        local pending = self:_pendingTiles(x1, y1, x2, y2)
+        local i = 0
+        _scheduleAsync(function()
+            i = i + 1
+            if i <= #pending then
+                local t = pending[i]
+                self:loadNavTile(t[1], t[2])
+                return false  -- more tiles to load
+            end
+            return true  -- all tiles loaded
+        end, function()
+            info("tiles loaded (%d total), computing path...", #pending)
+            local straightResult, nstraight, total = self:_run_query(x1, y1, x2, y2)
+            if not straightResult then
+                callback(nil, -1.0)
+                return
+            end
+            local waypoints = {}
+            for k = 1, nstraight do
+                local pt = straightResult[k]
+                waypoints[k] = { pt[3], pt[1] }
+            end
+            callback(waypoints, total)
+        end)
+    end
+
+    -- computeDistanceAsync(x1, y1, x2, y2, callback)
+    -- Loads required nav tiles one per frame tick, then computes path distance.
+    -- callback(distance) where distance >= 0 on success, -1 on failure.
+    function pf:computeDistanceAsync(x1, y1, x2, y2, callback)
+        dbg("computeDistanceAsync (%.4f, %.4f) -> (%.4f, %.4f)", x1, y1, x2, y2)
+        local pending = self:_pendingTiles(x1, y1, x2, y2)
+        local i = 0
+        _scheduleAsync(function()
+            i = i + 1
+            if i <= #pending then
+                local t = pending[i]
+                self:loadNavTile(t[1], t[2])
+                return false
+            end
+            return true
+        end, function()
+            info("tiles loaded (%d total), computing distance...", #pending)
+            local _, _, total = self:_run_query(x1, y1, x2, y2)
+            callback(total)
+        end)
     end
 
     -- getTerrainHeight(x, y) -> height
@@ -219,8 +330,9 @@ function M.new(dataDir, mapId)
         end
 
         local path, npolys, status = self._navQuery:findPath(
-            startRef, endRef, startPos, endPos, filter, MAX_POLYS)
-        dbg("findPath: %d polys", npolys)
+            startRef, endRef, startPos, endPos, filter, MAX_POLYS, info)
+        info("findPath done: %d polys status=0x%x%s", npolys, status or 0,
+            (status and (status % 256) >= 64) and " (PARTIAL)" or "")
 
         if npolys == 0 then return nil, 0, -1.0 end
 

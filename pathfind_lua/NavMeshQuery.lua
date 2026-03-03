@@ -730,7 +730,7 @@ function M.new(navmesh, maxNodes)
 
     -- findPath(startRef, endRef, startPos, endPos, filter, maxPath)
     -- Returns path (array of refs), pathCount, status
-    function q:findPath(startRef, endRef, startPos, endPos, filter, maxPath)
+    function q:findPath(startRef, endRef, startPos, endPos, filter, maxPath, logFn)
         maxPath = maxPath or 4096
 
         if not self._nav:isValidPolyRef(startRef) or
@@ -770,7 +770,27 @@ function M.new(navmesh, maxNodes)
         local _olHeap          = _openList.heap     -- for inlined push/pop/modify heap operations
         local endPosX = endPos[1]; local endPosY = endPos[2]; local endPosZ = endPos[3]
 
+        -- Time-budget check: bail out if we exceed ~70ms to stay within WoW's script limit.
+        -- Check every 256 outer iterations to amortize the cost of debugprofilestop().
+        local _dps        = type(debugprofilestop) == "function" and debugprofilestop or nil
+        local _t0         = _dps and _dps() or nil
+        local _iterBudget = 256
+        local _iters      = 0
+        local _timedOut   = false
+
         while _openList.size > 0 do
+            _iters = _iters + 1
+            if _iters >= _iterBudget then
+                _iters = 0
+                if _dps then
+                    local _elapsed = _dps() - _t0
+                    if logFn then logFn("findPath running: %.0fms elapsed, %d nodes open", _elapsed, _openList.size) end
+                    if _elapsed > 70 then
+                        _timedOut = true
+                        break
+                    end
+                end
+            end
             -- Inline _openList:pop() + _trickleDown: saves 2 CALL+RETURN per outer iteration
             local bestNode = _olHeap[1]
             local _olSz    = _openList.size
@@ -967,6 +987,9 @@ function M.new(navmesh, maxNodes)
         end
         if outOfNodes then
             status = status + DT_OUT_OF_NODES
+        end
+        if _timedOut then
+            status = status + DT_PARTIAL_RESULT
         end
 
         return path, pathCount, status

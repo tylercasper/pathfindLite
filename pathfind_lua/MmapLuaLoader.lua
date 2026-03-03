@@ -310,11 +310,15 @@ local function ensure_shard_loaded(dataDir, mapId, sx, sy)
 
   local prefix = resolve_addon_prefix()
   local addonName = string.format("%s_%03d_%02d_%02d", prefix, mapId, sx, sy)
+
+  -- If the addon already failed to load, don't retry or re-log.
+  if missing_addons[addonName] then return false end
+
   dbgf("mmaplua: ensure_shard_loaded %s (map=%d sx=%d sy=%d)", tostring(addonName), mapId, sx, sy)
   ensure_addon_loaded(dataDir, addonName, addonName, SHARD_LUA_FILENAME)
   if not get_shard_table(mapId, sx, sy) then
     dbgf("mmaplua: shard table missing after load (map=%d sx=%d sy=%d)", mapId, sx, sy)
-    -- Always log: shard table absent after load attempt means either LoadAddOn failed
+    -- Log once: shard table absent after load means either LoadAddOn failed
     -- (already logged above) or the addon loaded but didn't populate MmapLuaDB.shards.
     local db = rawget(_G, "MmapLuaDB")
     local shards = (type(db) == "table") and rawget(db, "shards") or nil
@@ -323,6 +327,7 @@ local function ensure_shard_loaded(dataDir, mapId, sx, sy)
     err("shard '%s' table missing after load: shards[%d]=%s [%d]=%s [%d]=%s",
       tostring(addonName), mapId, tostring(type(shards)),
       sx, tostring(type(mtab)), sy, tostring(type(stab)))
+    missing_addons[addonName] = true  -- suppress repeat logging
   end
   return not not get_shard_table(mapId, sx, sy)
 end

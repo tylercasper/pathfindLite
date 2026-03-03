@@ -1341,7 +1341,8 @@ function M.new(paramsData)
         -- The actual tile data follows after the 20-byte MmapTileHeader
         local tileData = data:sub(i)
 
-        local tile, err = parseTileData(self, tileData)
+        local ok, tile, err = pcall(parseTileData, self, tileData)
+        if not ok then return false, "parseTileData error: " .. tostring(tile) end
         if not tile then return false, err end
         local hdr = tile.header
 
